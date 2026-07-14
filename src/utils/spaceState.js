@@ -78,41 +78,12 @@ export const applyRoomMessageSummary = (spaces, event, isActiveSpace) => {
   return sortSpaces(updated);
 };
 
-/**
- * local summary(lastChatId 기준)가 snapshot summary보다 최신인지 판단한다.
- *
- * 정책:
- * - local에 lastChatId가 없으면 보존할 local summary가 없으므로 false(snapshot 사용).
- * - snapshot에 lastChatId가 없고 local에는 있으면 local이 더 최신이므로 true.
- * - 그 외에는 local > snapshot일 때만 local이 더 최신이다(같으면 snapshot 사용).
- *
- * @param {number|null|undefined} snapshotLastChatId
- * @param {number|null|undefined} localLastChatId
- * @returns {boolean}
- */
 const localSummaryIsNewer = (snapshotLastChatId, localLastChatId) => {
   if (localLastChatId == null) return false;
   if (snapshotLastChatId == null) return true;
   return localLastChatId > snapshotLastChatId;
 };
 
-/**
- * REST snapshot(서버 조회 결과)을 현재 local spaces와 병합한 새 배열을 반환한다.
- *
- * 목적: refreshSpaces GET이 진행되는 동안 더 최신 ROOM_MESSAGE_SUMMARY_UPDATED가 local에 반영된 경우,
- * 뒤늦게 도착한(상대적으로 오래된) snapshot이 그 최신 summary를 덮어쓰지 않도록 한다.
- *
- * 정책:
- * - 최종 Space 목록 구성은 snapshot이 권위를 가진다(local에만 있는 Space는 제거, snapshot에만 있는 Space는 추가).
- * - 각 Space에 대해 local summary(lastChatId 기준)가 snapshot summary보다 최신이면
- *   snapshot의 일반 필드(title 등)는 유지하고 lastMessage/lastChatId/createdDate/unreadMessageCount만 local 값으로 보존한다.
- * - snapshot이 같거나 더 최신이면(lastChatId 동일 포함) snapshot 값을 그대로 사용해 unread 등 파생 상태를 서버 기준으로 보정한다.
- * - 병합 후 sortSpaces로 재정렬한다.
- *
- * @param {Array} currentSpaces
- * @param {Array} snapshotSpaces
- * @returns {Array}
- */
 export const mergeSpaceSnapshot = (currentSpaces, snapshotSpaces) => {
   const currentByChatRoomId = new Map(
     currentSpaces.map((s) => [s.chatRoomId, s])

@@ -4,10 +4,9 @@ const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8080/ws/chat";
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 3000;
 
-export function useWebSocket(onMessage, onConnected) {
+export function useWebSocket(onMessage) {
   const socketRef = useRef(null);
   const onMessageRef = useRef(onMessage);
-  const onConnectedRef = useRef(onConnected);
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const manualCloseRef = useRef(false);
@@ -19,9 +18,6 @@ export function useWebSocket(onMessage, onConnected) {
   useEffect(() => {
     onMessageRef.current = onMessage;
   });
-  useEffect(() => {
-    onConnectedRef.current = onConnected;
-  });
 
   const connect = useCallback(() => {
     if (socketRef.current?.readyState === WebSocket.OPEN) return;
@@ -31,11 +27,8 @@ export function useWebSocket(onMessage, onConnected) {
 
     socket.onopen = () => {
       setConnected(true);
-      window.__orbitSocket = socket;
       setReconnecting(false);
       reconnectCountRef.current = 0;
-      // 연결(재연결) 완료 시 콜백 호출
-      onConnectedRef.current?.();
     };
 
     socket.onmessage = (event) => {
