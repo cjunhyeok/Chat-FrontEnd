@@ -9,7 +9,7 @@ import { useSpaceActivity } from "../socket/useSpaceActivity";
 import { leaveSpace, renameSpace } from "../api/spaceApi";
 import { useRoomHistory } from "../hooks/useRoomHistory";
 import { useRoomEntry } from "../hooks/useRoomEntry";
-import { createDebouncer } from "../utils/debounce";
+import { useReadReceipt } from "../hooks/useReadReceipt";
 import SpaceWindow from "../components/chat/SpaceWindow";
 import MemberPanel from "../components/chat/MemberPanel";
 import DiscussionPanel from "../components/chat/DiscussionPanel";
@@ -18,9 +18,6 @@ import WorkspaceBackground from "../components/chat/WorkspaceBackground";
 import ReconnectBanner from "../components/chat/ReconnectBanner";
 import WsErrorBanner from "../components/chat/WsErrorBanner";
 import ChatSidebar from "../components/chat/ChatSidebar";
-
-// READ_UP_TO 전송 debounce 지연시간 — 같은 room에서 연속 수신되는 메시지는 이 시간 동안 묶어 최신 chatId만 전송한다
-const READ_UP_TO_DEBOUNCE_MS = 800;
 
 export default function ChatPage() {
   const { auth } = useAuth();
@@ -60,39 +57,12 @@ export default function ChatPage() {
   const handleEnterRoomAckRef = useRef(() => {});
   const handleEnterRoomErrorRef = useRef(() => {});
   const clearEnterRoomFailureRef = useRef(() => {});
-  const memberLastReadRef = useRef({});
   const countedDiscussionMessageIdsRef = useRef(new Set());
-  // handleMessage(CHAT_MESSAGE)가 최신 isSpaceActive/sendReadUpTo를 참조하도록 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  // handleMessage(ROOM_MESSAGE_SUMMARY_UPDATED)가 최신 isSpaceActive를 참조하도록 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const isSpaceActiveRef = useRef(() => false);
-  const sendReadUpToRef = useRef(() => {});
-  // 현재 room에서 서버로 보낼 예정인 read cursor (같은 debounce 창 안에서 여러 메시지가 오면 max로 누적)
-  const pendingReadCursorRef = useRef(null);
-  // 현재 room에서 마지막으로 실제 전송한 read cursor (중복 전송 방지)
-  const lastSentReadCursorRef = useRef(null);
-  // READ_UP_TO 전송을 debounce하는 인스턴스
-  const readUpToDebouncerRef = useRef(createDebouncer(READ_UP_TO_DEBOUNCE_MS));
-
-  // active 상태인 현재 room에서만 read cursor를 누적하고 debounce 후 READ_UP_TO를 예약한다.
-  // pendingReadCursorRef는 항상 "지금까지 누적된 가장 큰 chatId"를 들고 있어,
-  // debounce가 발화하는 시점에 참조해도 그 사이 도착한 최신 메시지의 chatId가 반영된다.
-  const scheduleReadUpTo = useCallback((chatRoomId, chatId) => {
-    if (chatId == null) return;
-    if (!isSpaceActiveRef.current(chatRoomId)) return;
-
-    pendingReadCursorRef.current =
-      pendingReadCursorRef.current == null
-        ? chatId
-        : Math.max(pendingReadCursorRef.current, chatId);
-
-    readUpToDebouncerRef.current.schedule(() => {
-      const cursor = pendingReadCursorRef.current;
-      if (cursor == null) return;
-      if (lastSentReadCursorRef.current != null && cursor <= lastSentReadCursorRef.current) return;
-
-      lastSentReadCursorRef.current = cursor;
-      sendReadUpToRef.current(chatRoomId, cursor);
-    });
-  }, []);
+  // handleMessage가 useReadReceipt보다 먼저 선언되어 최신 함수를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  const scheduleReadUpToRef = useRef(() => {});
+  const shouldApplyReadEventRef = useRef(() => false);
 
   // WebSocket 수신 메시지 처리
   const handleMessage = useCallback(
@@ -101,7 +71,7 @@ export default function ChatPage() {
         case "CHAT_MESSAGE":
           if (data.chatRoomId === selectedSpaceIdRef.current) {
             handleChatMessageRef.current(data);
-            scheduleReadUpTo(data.chatRoomId, data.chatId);
+            scheduleReadUpToRef.current(data.chatRoomId, data.chatId);
           }
           break;
 
@@ -119,11 +89,7 @@ export default function ChatPage() {
 
         case "READ_EVENT": {
           if (data.chatRoomId !== selectedSpaceIdRef.current) break;
-
-          const lastProcessed = memberLastReadRef.current[data.memberId] ?? null;
-          if (lastProcessed !== null && data.currentLastReadChatId <= lastProcessed) break;
-
-          memberLastReadRef.current[data.memberId] = data.currentLastReadChatId;
+          if (!shouldApplyReadEventRef.current(data)) break;
 
           handleReadEventRef.current(data);
 
@@ -223,7 +189,6 @@ export default function ChatPage() {
       setWsError,
       refreshSpaces,
       clearDiscussionEvents,
-      scheduleReadUpTo,
     ]
   );
 
@@ -310,24 +275,26 @@ export default function ChatPage() {
     onActivate: handleSpaceActivated,
   });
 
+  const { scheduleReadUpTo, shouldApplyReadEvent, resetReadReceipt } = useReadReceipt({
+    sendReadUpTo,
+    isSpaceActive,
+  });
+
   // handleMessage(ENTER_ROOM_ACK)가 최신 notifyEntered를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
     notifyEnteredRef.current = notifyEntered;
   });
 
-  // handleMessage(CHAT_MESSAGE)가 최신 sendReadUpTo/isSpaceActive를 참조하도록 매 렌더마다 동기화한다
+  // handleMessage(ROOM_MESSAGE_SUMMARY_UPDATED)가 최신 isSpaceActive를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
-    sendReadUpToRef.current = sendReadUpTo;
     isSpaceActiveRef.current = isSpaceActive;
   });
 
-  // 컴포넌트 unmount 시 예약된 READ_UP_TO debounce timer를 정리한다
+  // handleMessage(CHAT_MESSAGE/READ_EVENT)가 최신 scheduleReadUpTo/shouldApplyReadEvent를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
-    const debouncer = readUpToDebouncerRef.current;
-    return () => {
-      debouncer.cancel();
-    };
-  }, []);
+    scheduleReadUpToRef.current = scheduleReadUpTo;
+    shouldApplyReadEventRef.current = shouldApplyReadEvent;
+  });
 
   // selectedSpaceIdRef를 최신 selectedSpaceId로 동기화 (reconnect effect에서 사용)
   useEffect(() => { selectedSpaceIdRef.current = selectedSpaceId; }, [selectedSpaceId]);
@@ -352,17 +319,14 @@ export default function ChatPage() {
 
         const spaceId = selectedSpaceIdRef.current;
         if (spaceId !== null) {
-          memberLastReadRef.current = {};
-          readUpToDebouncerRef.current.cancel();
-          pendingReadCursorRef.current = null;
-          lastSentReadCursorRef.current = null;
+          resetReadReceipt();
           recoverHistoryAfterReconnect(spaceId);
         }
       }
       isInitialConnectRef.current = false;
     }
     prevConnectedRef.current = connected;
-  }, [connected, refreshSpaces, recoverHistoryAfterReconnect]);
+  }, [connected, refreshSpaces, recoverHistoryAfterReconnect, resetReadReceipt]);
 
   // 좌측 상단 UserHeader 등 앱 전체 네트워크/소켓 상태를 나타내는 global connection state
   // (ENTER_ROOM synchronization 여부는 보지 않음)
@@ -377,15 +341,12 @@ export default function ChatPage() {
     (spaceId) => {
       if (spaceId === selectedSpaceId) return;
       setPanelState(null);
-      memberLastReadRef.current = {};
-      readUpToDebouncerRef.current.cancel();
-      pendingReadCursorRef.current = null;
-      lastSentReadCursorRef.current = null;
+      resetReadReceipt();
       setSelectedSpaceId(spaceId);
       patchSpace(spaceId, { unreadMessageCount: 0 });
       loadHistoryForSpace(spaceId);
     },
-    [selectedSpaceId, patchSpace, loadHistoryForSpace]
+    [selectedSpaceId, patchSpace, loadHistoryForSpace, resetReadReceipt]
   );
 
   usePendingInvite({ connected, spacesLoaded, spaces, onSelectSpace: handleSelectSpace });
