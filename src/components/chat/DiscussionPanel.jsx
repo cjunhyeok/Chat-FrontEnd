@@ -100,6 +100,21 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
     setDiscussionMessages((prev) => [...prev, ...toAppend]);
   }, [incomingDiscussionEvents, discussionId, onConsumeDiscussionEvents, auth.memberId]);
 
+  // discussionId 확정 후 최초 조회·"다시 시도" 버튼 공통 사용.
+  // loading 표시 + 실패 시 messagesError 세팅까지 담당한다. reconnect re-sync는 loading을 표시하지 않는
+  // 별도 정책이라 이 helper를 쓰지 않고 syncDiscussionMessages를 직접 호출한다.
+  const runMessagesSyncWithLoading = useCallback(() => {
+    setMessagesLoading(true);
+    setMessagesError(null);
+    return syncDiscussionMessages()
+      .catch(() => {
+        setMessagesError("메시지를 불러오지 못했습니다.");
+      })
+      .finally(() => {
+        setMessagesLoading(false);
+      });
+  }, [syncDiscussionMessages]);
+
   useEffect(() => {
     if (!discussionId) {
       processedMessageIdsRef.current = new Set();
@@ -108,16 +123,8 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
       setMessagesLoading(false);
       return;
     }
-    setMessagesLoading(true);
-    setMessagesError(null);
-    syncDiscussionMessages()
-      .catch(() => {
-        setMessagesError("메시지를 불러오지 못했습니다.");
-      })
-      .finally(() => {
-        setMessagesLoading(false);
-      });
-  }, [discussionId, syncDiscussionMessages]);
+    runMessagesSyncWithLoading();
+  }, [discussionId, runMessagesSyncWithLoading]);
 
   useEffect(() => {
     if (!shouldScrollRef.current) return;
@@ -288,17 +295,7 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
                 <div className="flex flex-col items-center justify-center flex-1 gap-3 px-4">
                   <p className="text-sm text-orbit-subtle text-center">{messagesError}</p>
                   <button
-                    onClick={() => {
-                      setMessagesError(null);
-                      setMessagesLoading(true);
-                      syncDiscussionMessages()
-                        .catch(() => {
-                          setMessagesError("메시지를 불러오지 못했습니다.");
-                        })
-                        .finally(() => {
-                          setMessagesLoading(false);
-                        });
-                    }}
+                    onClick={runMessagesSyncWithLoading}
                     className="text-xs text-orbit-cyan hover:text-orbit-text transition-colors"
                   >
                     다시 시도
