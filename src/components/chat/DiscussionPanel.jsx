@@ -28,6 +28,10 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
   // 컴포넌트 마운트마다 초기화되므로 panel 재오픈 시 자동 리셋된다.
   const processedMessageIdsRef = useRef(new Set());
   const syncFetchIdRef = useRef(0);
+  // getDiscussion/createDiscussion의 stale 응답 방어용. DiscussionPanel은 message prop만 바뀌어도
+  // (리마운트 없이) 재사용되므로, 두 요청이 같은 discussion state를 쓰는 공유 카운터로 이전 messageId의
+  // 늦은 응답이 현재 messageId의 state를 덮어쓰지 못하게 한다.
+  const discussionRequestIdRef = useRef(0);
   const isComposingRef = useRef(false);
   // reconnect 감지용: null=초기 마운트, false=단절, true=연결
   const prevConnectedRef = useRef(null);
@@ -35,15 +39,18 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
   const shouldScrollRef = useRef(false);
 
   const loadDiscussion = useCallback(() => {
+    const requestId = ++discussionRequestIdRef.current;
     setStatus("loading");
     setDiscussion(null);
     setCreateError(null);
     getDiscussion(messageId)
       .then((result) => {
+        if (requestId !== discussionRequestIdRef.current) return;
         setDiscussion(result.data);
         setStatus("loaded");
       })
       .catch((err) => {
+        if (requestId !== discussionRequestIdRef.current) return;
         if (err?.response?.status === 404) {
           setStatus("not_found");
         } else {
@@ -152,20 +159,28 @@ export default function DiscussionPanel({ message, onClose, incomingDiscussionEv
 
   const handleCreate = async () => {
     if (creating) return;
+    const requestId = ++discussionRequestIdRef.current;
     setCreating(true);
     setCreateError(null);
     try {
       const result = await createDiscussion(messageId);
-      setDiscussion(result.data);
-      setStatus("loaded");
+      if (requestId === discussionRequestIdRef.current) {
+        setDiscussion(result.data);
+        setStatus("loaded");
+      }
     } catch (err) {
-      if (err?.response?.status === 409) {
-        loadDiscussion();
-      } else {
-        setCreateError("Discussion 생성에 실패했습니다.");
+      if (requestId === discussionRequestIdRef.current) {
+        if (err?.response?.status === 409) {
+          loadDiscussion();
+        } else {
+          setCreateError("Discussion 생성에 실패했습니다.");
+        }
       }
     } finally {
-      setCreating(false);
+      // stale 요청의 finally가 이후 요청(다른 messageId)의 creating=true를 조기에 false로 되돌리지 않도록 guard한다.
+      if (requestId === discussionRequestIdRef.current) {
+        setCreating(false);
+      }
     }
   };
 
