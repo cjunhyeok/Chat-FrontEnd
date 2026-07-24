@@ -98,12 +98,18 @@ export function useWebSocket(onMessage) {
     );
   }, []);
 
-  // READ_UP_TO: 현재 room에서 lastReadMessageId까지 읽었음을 서버에 알림 (ChatPage에서 debounce 후 호출)
+  // READ_UP_TO: 현재 room에서 lastReadMessageId까지 읽었음을 서버에 알림 (useReadReceipt가 throttle 후 호출)
+  // 반환값은 서버 처리 성공/ACK를 의미하지 않는다 — socket이 OPEN이고 send()가 동기 예외 없이 실행됐는지만 나타낸다.
   const sendReadUpTo = useCallback((chatRoomId, lastReadMessageId) => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(
-      JSON.stringify({ messageType: "READ_UP_TO", chatRoomId, lastReadMessageId })
-    );
+    if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
+    try {
+      socketRef.current.send(
+        JSON.stringify({ messageType: "READ_UP_TO", chatRoomId, lastReadMessageId })
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
   }, []);
 
   const sendDiscussionMessage = useCallback((discussionId, content) => {

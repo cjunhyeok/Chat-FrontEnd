@@ -63,6 +63,9 @@ export default function ChatPage() {
   // handleMessage가 useReadReceipt보다 먼저 선언되어 최신 함수를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const scheduleReadUpToRef = useRef(() => {});
   const shouldApplyReadEventRef = useRef(() => false);
+  // useSpaceActivity(inactive 전환 직전 콜백)가 useReadReceipt보다 먼저 선언되어 최신 flushPendingRead/discardPendingRead를
+  // 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  const onBeforeInactiveRef = useRef(() => {});
 
   // WebSocket 수신 메시지 처리
   const handleMessage = useCallback(
@@ -273,11 +276,27 @@ export default function ChatPage() {
     sendRoomActive,
     sendRoomInactive,
     onActivate: handleSpaceActivated,
+    onBeforeInactive: (spaceId) => onBeforeInactiveRef.current(spaceId),
   });
 
-  const { scheduleReadUpTo, shouldApplyReadEvent, resetReadReceipt } = useReadReceipt({
+  const {
+    scheduleReadUpTo,
+    flushPendingRead,
+    discardPendingRead,
+    resetReadReceipt,
+    shouldApplyReadEvent,
+  } = useReadReceipt({
     sendReadUpTo,
     isSpaceActive,
+  });
+
+  // useSpaceActivity(inactive 전환 직전 콜백)가 최신 flushPendingRead/discardPendingRead를 참조하도록 매 렌더마다 동기화한다.
+  // blur/hidden은 같은 방을 유지하므로 resetReadReceipt()가 아니라 flush + discard만 수행한다 (memberLastReadRef 보존).
+  useEffect(() => {
+    onBeforeInactiveRef.current = (spaceId) => {
+      flushPendingRead(spaceId);
+      discardPendingRead();
+    };
   });
 
   // handleMessage(ENTER_ROOM_ACK)가 최신 notifyEntered를 참조하도록 매 렌더마다 동기화한다
@@ -312,6 +331,7 @@ export default function ChatPage() {
   }, []);
 
   // 재연결 시 state recovery: WebSocket이 false→true로 바뀌면 상태 재동기화
+  // (연결 끊김 자체의 READ 상태 정리는 아래 같은 effect의 else 분기가 담당한다 — prevConnectedRef를 공유해 true→false 전이를 구분한다)
   useEffect(() => {
     if (connected && !prevConnectedRef.current) {
       if (!isInitialConnectRef.current) {
@@ -319,14 +339,21 @@ export default function ChatPage() {
 
         const spaceId = selectedSpaceIdRef.current;
         if (spaceId !== null) {
+          // reconnect의 cursor 정합성 복구는 ENTER_ROOM이 아니라 recoverHistoryAfterReconnect(history 재조회)가 담당한다
+          // (백엔드 확인 결과 ENTER_ROOM은 세션 등록/in-memory active 설정만 하고 cursor catch-up이나 READ_EVENT 발행을 하지 않는다).
+          // 따라서 disconnect 이전의 local pending을 여기서 재전송하지 않는다.
           resetReadReceipt();
           recoverHistoryAfterReconnect(spaceId);
         }
       }
       isInitialConnectRef.current = false;
+    } else if (!connected && prevConnectedRef.current) {
+      // 실제 연결 끊김(true→false)에서만 pending READ_UP_TO를 폐기한다.
+      // 최초 마운트 시의 초기 connected=false는 prevConnectedRef.current도 초기값 false이므로 이 분기에 들어오지 않는다.
+      discardPendingRead();
     }
     prevConnectedRef.current = connected;
-  }, [connected, refreshSpaces, recoverHistoryAfterReconnect, resetReadReceipt]);
+  }, [connected, refreshSpaces, recoverHistoryAfterReconnect, resetReadReceipt, discardPendingRead]);
 
   // 좌측 상단 UserHeader 등 앱 전체 네트워크/소켓 상태를 나타내는 global connection state
   // (ENTER_ROOM synchronization 여부는 보지 않음)
@@ -341,12 +368,16 @@ export default function ChatPage() {
     (spaceId) => {
       if (spaceId === selectedSpaceId) return;
       setPanelState(null);
+      // 이전 방의 pending READ_UP_TO를 best-effort로 flush한 뒤(성공/실패와 무관하게) READ 상태 전체를 reset한다.
+      // flushPendingRead는 selectedSpaceIdRef가 아니라 훅 내부 pendingRoomIdRef를 신뢰하므로, 여기서는 "이전 방"임을
+      // 명시적으로 검증하기 위해 아직 갱신 전인 selectedSpaceId(이전 값)를 expectedRoomId로 전달한다.
+      flushPendingRead(selectedSpaceId);
       resetReadReceipt();
       setSelectedSpaceId(spaceId);
       patchSpace(spaceId, { unreadMessageCount: 0 });
       loadHistoryForSpace(spaceId);
     },
-    [selectedSpaceId, patchSpace, loadHistoryForSpace, resetReadReceipt]
+    [selectedSpaceId, patchSpace, loadHistoryForSpace, flushPendingRead, resetReadReceipt]
   );
 
   usePendingInvite({ connected, spacesLoaded, spaces, onSelectSpace: handleSelectSpace });
@@ -357,13 +388,15 @@ export default function ChatPage() {
     const spaceId = selectedSpaceId;
     try {
       await leaveSpace(spaceId);
+      // 서버에서 이미 방을 나갔으므로(ROOM_NOT_JOINED) flush는 시도하지 않고 로컬 READ 상태만 정리한다
+      resetReadReceipt();
       setSelectedSpaceId(null);
       setPanelState(null);
       removeSpace(spaceId);
     } catch (e) {
       // ignore
     }
-  }, [selectedSpaceId, removeSpace]);
+  }, [selectedSpaceId, removeSpace, resetReadReceipt]);
 
   // 채팅방 이름 변경
   const handleRenameRoom = useCallback(async (newTitle) => {
@@ -392,8 +425,11 @@ export default function ChatPage() {
   }, []);
 
   const handleBack = useCallback(() => {
+    // 방 선택 해제는 사실상 방을 떠나는 동작이므로 방 전환과 동일한 순서로 정리한다
+    flushPendingRead(selectedSpaceId);
+    resetReadReceipt();
     setSelectedSpaceId(null);
-  }, []);
+  }, [selectedSpaceId, flushPendingRead, resetReadReceipt]);
 
   const handleToggleMembers = useCallback(() => {
     setPanelState((p) => (p?.type === "members" ? null : { type: "members" }));
