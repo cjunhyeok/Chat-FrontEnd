@@ -7,9 +7,9 @@ import { useWsErrorBanner } from "../hooks/useWsErrorBanner";
 import { useWebSocket } from "../socket/useWebSocket";
 import { useSpaceActivity } from "../socket/useSpaceActivity";
 import { leaveSpace, renameSpace } from "../api/spaceApi";
-import { getMessageHistory } from "../api/messageApi";
-import { mergeMessagesById, applyReadEvent, removePendingByClientMessageId, markPendingMessageFailed, markPendingMessageSending } from "../utils/messageState";
-import { createDebouncer } from "../utils/debounce";
+import { useRoomHistory } from "../hooks/useRoomHistory";
+import { useRoomEntry } from "../hooks/useRoomEntry";
+import { useReadReceipt } from "../hooks/useReadReceipt";
 import SpaceWindow from "../components/chat/SpaceWindow";
 import MemberPanel from "../components/chat/MemberPanel";
 import DiscussionPanel from "../components/chat/DiscussionPanel";
@@ -18,20 +18,6 @@ import WorkspaceBackground from "../components/chat/WorkspaceBackground";
 import ReconnectBanner from "../components/chat/ReconnectBanner";
 import WsErrorBanner from "../components/chat/WsErrorBanner";
 import ChatSidebar from "../components/chat/ChatSidebar";
-
-// CHAT_MESSAGE ERROR의 errorCode 중 같은 메시지를 재시도해도 동일하게 실패하는 errorCode.
-// ROOM_NOT_JOINED: handleRetryMessage는 sendChatMessage만 재호출하고 ENTER_ROOM을 다시 보내지 않으므로,
-// session이 room에 등록되지 않은 상태는 메시지 재시도만으로 복구되지 않는다. (ENTER_ROOM -> ACK -> ready 복구 후 재전송이 필요)
-// 여기 없는 errorCode(INTERNAL_ERROR, 미분류 포함)는 재시도 가능으로 간주한다(fail-open).
-const CHAT_MESSAGE_NON_RETRYABLE_ERROR_CODES = new Set([
-  "ROOM_NOT_JOINED",
-  "ROOM_NOT_FOUND",
-  "UNAUTHORIZED",
-  "INVALID_MESSAGE",
-]);
-
-// READ_UP_TO 전송 debounce 지연시간 — 같은 room에서 연속 수신되는 메시지는 이 시간 동안 묶어 최신 chatId만 전송한다
-const READ_UP_TO_DEBOUNCE_MS = 800;
 
 export default function ChatPage() {
   const { auth } = useAuth();
@@ -44,24 +30,9 @@ export default function ChatPage() {
   // 데이터 상태 — realtime 연동 (위치 유지)
   const [selectedSpaceId, setSelectedSpaceId] = useState(null);
   const [online, setOnline] = useState(navigator.onLine);
-  // 서버가 ENTER_ROOM_ACK로 입장을 확인한 selectedSpaceId (enteredSpaceIdRef의 상태 버전). ENTER_ROOM 전송만으로는 설정되지 않는다.
-  const [enteredSpaceId, setEnteredSpaceId] = useState(null);
-  // 현재 selectedSpaceId에 대한 ENTER_ROOM이 ERROR로 실패해 재시도 UI를 보여줘야 하는지. wsError(4초 후 자동 소멸)와 독립적으로 유지된다.
-  const [enterRoomFailed, setEnterRoomFailed] = useState(false);
-  // enterRoomFailed=true인 실패 중에서 "다시 보내면 성공할 가능성이 있는지". INVALID_REQUEST(FE 요청/프로토콜 오류)처럼 같은 요청을 반복해도 성공할 수 없는 경우에만 false가 된다.
-  const [enterRoomRetryable, setEnterRoomRetryable] = useState(true);
 
   const { spaces, spacesError, spacesLoaded, selectedSpace, refreshSpaces, applyMessageSummary, removeSpace, patchSpace } =
     useSpaces(selectedSpaceId);
-  const [messages, setMessages] = useState([]);
-  // FE에서만 존재하는 전송 중 메시지 (echo reconciliation 이전 단계, clientMessageId로 식별)
-  const [pendingMessages, setPendingMessages] = useState([]);
-  const [lastReadMessageId, setLastReadMessageId] = useState(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
-  const [oldestChatId, setOldestChatId] = useState(null);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const { wsError, setWsError } = useWsErrorBanner();
 
   const {
@@ -75,57 +46,47 @@ export default function ChatPage() {
   const selectedSpaceIdRef = useRef(null);
   const prevConnectedRef = useRef(false);
   const isInitialConnectRef = useRef(true);
-  // ENTER_ROOM_ACK를 수신해 서버가 입장을 확인한 selectedSpaceId
-  const enteredSpaceIdRef = useRef(null);
-  // ENTER_ROOM을 보냈지만 아직 ACK/ERROR 응답을 받지 못한 spaceId. 중복 ENTER_ROOM 전송 방지용으로만 쓰인다.
-  // ACK/ERROR 매칭은 이 ref가 아니라 selectedSpaceIdRef와의 비교로만 판단한다 (timeout이 없으므로 "이미 해제된 pending"이라는 개념이 없다)
-  const pendingEnterRoomSpaceIdRef = useRef(null);
   // handleMessage(useCallback)가 useSpaceActivity보다 먼저 선언되어 notifyEntered를 직접 참조할 수 없으므로 ref로 우회한다
   const notifyEnteredRef = useRef(() => {});
-  const historyFetchIdRef = useRef(0);
-  const memberLastReadRef = useRef({});
+  // handleMessage가 useRoomHistory/useRoomEntry보다 먼저 선언되어 최신 핸들러를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  const handleChatMessageRef = useRef(() => {});
+  const handleReadEventBatchRef = useRef(() => {});
+  const handleChatMessageErrorRef = useRef(() => {});
+  const handleDiscussionMessageCountRef = useRef(() => {});
+  const clearMessagesRef = useRef(() => {});
+  const handleEnterRoomAckRef = useRef(() => {});
+  const handleEnterRoomErrorRef = useRef(() => {});
+  const clearEnterRoomFailureRef = useRef(() => {});
   const countedDiscussionMessageIdsRef = useRef(new Set());
-  // handleMessage(CHAT_MESSAGE)가 최신 isSpaceActive/sendReadUpTo를 참조하도록 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  // handleMessage(ROOM_MESSAGE_SUMMARY_UPDATED)가 최신 isSpaceActive를 참조하도록 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const isSpaceActiveRef = useRef(() => false);
-  const sendReadUpToRef = useRef(() => {});
-  // 현재 room에서 서버로 보낼 예정인 read cursor (같은 debounce 창 안에서 여러 메시지가 오면 max로 누적)
-  const pendingReadCursorRef = useRef(null);
-  // 현재 room에서 마지막으로 실제 전송한 read cursor (중복 전송 방지)
-  const lastSentReadCursorRef = useRef(null);
-  // READ_UP_TO 전송을 debounce하는 인스턴스
-  const readUpToDebouncerRef = useRef(createDebouncer(READ_UP_TO_DEBOUNCE_MS));
-
-  // active 상태인 현재 room에서만 read cursor를 누적하고 debounce 후 READ_UP_TO를 예약한다.
-  // pendingReadCursorRef는 항상 "지금까지 누적된 가장 큰 chatId"를 들고 있어,
-  // debounce가 발화하는 시점에 참조해도 그 사이 도착한 최신 메시지의 chatId가 반영된다.
-  const scheduleReadUpTo = useCallback((chatRoomId, chatId) => {
-    if (chatId == null) return;
-    if (!isSpaceActiveRef.current(chatRoomId)) return;
-
-    pendingReadCursorRef.current =
-      pendingReadCursorRef.current == null
-        ? chatId
-        : Math.max(pendingReadCursorRef.current, chatId);
-
-    readUpToDebouncerRef.current.schedule(() => {
-      const cursor = pendingReadCursorRef.current;
-      if (cursor == null) return;
-      if (lastSentReadCursorRef.current != null && cursor <= lastSentReadCursorRef.current) return;
-
-      lastSentReadCursorRef.current = cursor;
-      sendReadUpToRef.current(chatRoomId, cursor);
-    });
-  }, []);
+  // handleMessage가 useReadReceipt보다 먼저 선언되어 최신 함수를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  const scheduleReadUpToRef = useRef(() => {});
+  const selectApplicableReadEventsRef = useRef(() => []);
+  // useSpaceActivity(inactive 전환 직전 콜백)가 useReadReceipt보다 먼저 선언되어 최신 flushPendingRead/discardPendingRead를
+  // 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
+  const onBeforeInactiveRef = useRef(() => {});
 
   // WebSocket 수신 메시지 처리
   const handleMessage = useCallback(
     (data) => {
+      // READ_EVENT/READ_EVENT_BATCH 공통 처리: 현재 방 검증 → 유효성 검사/중복 병합/stale 판단(useReadReceipt) →
+      // 통과한 read만 한 번의 messages 반영(useRoomHistory)으로 전달한다. reads가 배열이 아니거나 비어 있으면 조용히 무시한다.
+      const applyReadEventReads = (chatRoomId, reads) => {
+        if (chatRoomId !== selectedSpaceIdRef.current) return;
+        if (!Array.isArray(reads) || reads.length === 0) return;
+
+        const applicableReads = selectApplicableReadEventsRef.current(reads);
+        if (applicableReads.length === 0) return;
+
+        handleReadEventBatchRef.current(applicableReads);
+      };
+
       switch (data.messageType) {
         case "CHAT_MESSAGE":
           if (data.chatRoomId === selectedSpaceIdRef.current) {
-            setPendingMessages((prev) => removePendingByClientMessageId(prev, data.clientMessageId));
-            setMessages((prev) => mergeMessagesById(prev, [data]));
-            scheduleReadUpTo(data.chatRoomId, data.chatId);
+            handleChatMessageRef.current(data);
+            scheduleReadUpToRef.current(data.chatRoomId, data.chatId);
           }
           break;
 
@@ -141,18 +102,15 @@ export default function ChatPage() {
           applyMessageSummary(data, isSpaceActiveRef.current(data.chatRoomId));
           break;
 
-        case "READ_EVENT": {
-          if (data.chatRoomId !== selectedSpaceIdRef.current) break;
-
-          const lastProcessed = memberLastReadRef.current[data.memberId] ?? null;
-          if (lastProcessed !== null && data.currentLastReadChatId <= lastProcessed) break;
-
-          memberLastReadRef.current[data.memberId] = data.currentLastReadChatId;
-
-          setMessages((prev) => applyReadEvent(prev, data));
-
+        // READ_EVENT(단건)와 READ_EVENT_BATCH(배열)는 같은 경로(applyReadEventReads)로 합류한다 —
+        // 단건은 배열 1개로 감싸 전달할 뿐, 유효성 검사·중복 병합·stale 판단·messages 반영 로직은 완전히 동일하다.
+        case "READ_EVENT":
+          applyReadEventReads(data.chatRoomId, [data]);
           break;
-        }
+
+        case "READ_EVENT_BATCH":
+          applyReadEventReads(data.chatRoomId, data.reads);
+          break;
 
         case "DISCUSSION_MESSAGE_EVENT":
           if (data.spaceId !== selectedSpaceIdRef.current) break;
@@ -164,18 +122,7 @@ export default function ChatPage() {
             !countedDiscussionMessageIdsRef.current.has(data.discussionMessageId)
           ) {
             countedDiscussionMessageIdsRef.current.add(data.discussionMessageId);
-
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.chatId === data.chatId
-                  ? {
-                      ...msg,
-                      discussionMessageCount: (msg.discussionMessageCount ?? 0) + 1,
-                      discussionId: msg.discussionId ?? data.discussionId,
-                    }
-                  : msg
-              )
-            );
+            handleDiscussionMessageCountRef.current(data);
           }
           break;
 
@@ -183,14 +130,7 @@ export default function ChatPage() {
           // 이미 다른 Space로 전환된 뒤 늦게 도착한 stale ACK는 무시한다 (timeout이 없으므로 이 비교가 유일한 매칭 기준이다)
           if (data.chatRoomId !== selectedSpaceIdRef.current) break;
 
-          // 같은 spaceId로 대기 중이던 pending이면 dedup 가드를 해제한다 (일치하지 않아도 ACK 반영 자체는 막지 않는다)
-          if (pendingEnterRoomSpaceIdRef.current === data.chatRoomId) {
-            pendingEnterRoomSpaceIdRef.current = null;
-          }
-          enteredSpaceIdRef.current = data.chatRoomId;
-          setEnteredSpaceId(data.chatRoomId);
-          setEnterRoomFailed(false);
-          setEnterRoomRetryable(true);
+          handleEnterRoomAckRef.current(data.chatRoomId);
           // ENTER_ROOM이 서버에서 active 등록까지 수행하므로, ACK로 확인된 이후에만 active로 간주한다
           notifyEnteredRef.current(data.chatRoomId);
           break;
@@ -208,35 +148,11 @@ export default function ChatPage() {
             data.chatRoomId === selectedSpaceIdRef.current;
 
           if (data.requestType === "CHAT_MESSAGE" && data.clientMessageId) {
-            // errorCode/retryable은 markPendingMessageFailed가 다루는 status와 별개의 부가 필드로 얹는다
-            setPendingMessages((prev) =>
-              markPendingMessageFailed(prev, data.clientMessageId).map((p) =>
-                p.clientMessageId === data.clientMessageId
-                  ? {
-                      ...p,
-                      errorCode: data.errorCode,
-                      retryable: !CHAT_MESSAGE_NON_RETRYABLE_ERROR_CODES.has(data.errorCode),
-                    }
-                  : p
-              )
-            );
+            handleChatMessageErrorRef.current(data.clientMessageId, data.errorCode);
           }
 
           if (isEnterRoomError) {
-            // 같은 spaceId로 대기 중이던 pending이면 dedup 가드를 해제한다
-            if (pendingEnterRoomSpaceIdRef.current === data.chatRoomId) {
-              pendingEnterRoomSpaceIdRef.current = null;
-            }
-            enteredSpaceIdRef.current = null;
-            setEnteredSpaceId(null);
-            // 재시도 UI 노출 — 사용자가 명시적으로 재시도하기 전까지 유지된다 (자동 재시도 없음)
-            setEnterRoomFailed(true);
-            // INVALID_REQUEST(FE 요청/프로토콜 오류), UNAUTHORIZED(로그인 만료)는 같은 요청을 다시 보내도
-            // 성공할 가능성이 낮으므로 재시도 버튼을 숨긴다
-            setEnterRoomRetryable(
-              data.errorCode !== "INVALID_REQUEST" &&
-              data.errorCode !== "UNAUTHORIZED"
-            );
+            handleEnterRoomErrorRef.current(data.chatRoomId, data.errorCode);
           }
 
           // INTERNAL_ERROR는 권한/목록 문제가 아니라 서버 내부 처리 실패다 — BE 원문은 "재시도해도 되는지"가 불명확해 FE에서만 문구를 보완한다
@@ -267,11 +183,10 @@ export default function ChatPage() {
 
               // 목록에서 사라짐 — 더 이상 접근할 수 없는 Space
               setSelectedSpaceId(null);
-              setMessages([]);
-              setPendingMessages([]);
+              clearMessagesRef.current();
               setPanelState(null);
               clearDiscussionEvents();
-              setEnterRoomFailed(false);
+              clearEnterRoomFailureRef.current();
               setWsError("더 이상 접근할 수 없는 공간입니다.");
             });
           }
@@ -288,16 +203,76 @@ export default function ChatPage() {
       applyMessageSummary,
       appendDiscussionEvent,
       setWsError,
-      setEnteredSpaceId,
-      setEnterRoomFailed,
-      setEnterRoomRetryable,
       refreshSpaces,
       clearDiscussionEvents,
-      scheduleReadUpTo,
     ]
   );
 
   const { connected, reconnecting, sendEnterRoom, sendChatMessage, sendRoomActive, sendRoomInactive, sendReadUpTo, sendDiscussionMessage } = useWebSocket(handleMessage);
+
+  const {
+    enteredSpaceId,
+    enterRoomFailed,
+    enterRoomRetryable,
+    retryEnterRoom,
+    handleEnterRoomAck,
+    handleEnterRoomError,
+    clearEnterRoomFailure,
+  } = useRoomEntry({ connected, selectedSpaceId, sendEnterRoom });
+
+  // handleMessage가 useRoomEntry보다 먼저 선언되어 최신 핸들러를 직접 참조할 수 없으므로 ref로 동기화한다 (notifyEnteredRef와 동일한 이유)
+  useEffect(() => {
+    handleEnterRoomAckRef.current = handleEnterRoomAck;
+    handleEnterRoomErrorRef.current = handleEnterRoomError;
+    clearEnterRoomFailureRef.current = clearEnterRoomFailure;
+  });
+
+  // ENTER_ROOM 실패 후 사용자가 명시적으로 재시도할 때만 호출된다. wsError는 useRoomEntry가 모르는 공용 배너라 여기서 함께 비운다.
+  const handleRetryEnterRoom = useCallback(() => {
+    // 같은 메시지로 다시 실패해도 4초 배너가 온전히 재노출되도록 먼저 비운다 (useWsErrorBanner는 값이 바뀔 때만 타이머를 재시작함)
+    setWsError(null);
+    retryEnterRoom();
+  }, [retryEnterRoom, setWsError]);
+
+  // Space 메시지 전송 가능 여부를 나타내는 connection state
+  // offline: 네트워크 끊김 / reconnecting: 소켓 재연결 중 / synchronizing: ENTER_ROOM_ACK 대기 중 / ready: ACK 수신 완료(전송 가능)
+  // useRoomHistory(handleRetryMessage)가 필요로 하므로 이 hook 호출보다 앞서 계산해둔다
+  const connectionState = useMemo(() => {
+    if (!online) return "offline";
+    if (!connected) return "reconnecting";
+    if (selectedSpaceId !== null && enteredSpaceId !== selectedSpaceId) return "synchronizing";
+    return "ready";
+  }, [online, connected, selectedSpaceId, enteredSpaceId]);
+
+  const {
+    renderMessages,
+    lastReadMessageId,
+    historyLoading,
+    historyError,
+    hasMore,
+    isLoadingMore,
+    loadHistoryForSpace,
+    recoverHistoryAfterReconnect,
+    handleRetryHistory,
+    handleLoadMore,
+    handleChatMessage,
+    handleChatMessageError,
+    handleReadEventBatch,
+    handleDiscussionMessageCount,
+    handleSend,
+    handleRetryMessage,
+    handleRemoveFailedMessage,
+    clearMessages,
+  } = useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connectionState, sendChatMessage, auth });
+
+  // handleMessage가 useRoomHistory보다 먼저 선언되어 최신 핸들러를 직접 참조할 수 없으므로 ref로 동기화한다 (notifyEnteredRef와 동일한 이유)
+  useEffect(() => {
+    handleChatMessageRef.current = handleChatMessage;
+    handleReadEventBatchRef.current = handleReadEventBatch;
+    handleChatMessageErrorRef.current = handleChatMessageError;
+    handleDiscussionMessageCountRef.current = handleDiscussionMessageCount;
+    clearMessagesRef.current = clearMessages;
+  });
 
   // 세션이 특정 Space에 대해 실제로 inactive → active로 전환된 순간에만 호출된다 (useSpaceActivity 참고).
   // 방 선택 시점의 낙관적 초기화(handleSelectSpace)와는 별개로, 서버 activity 정책과 동일한 시점에 unread를 최종 보정한다.
@@ -314,6 +289,27 @@ export default function ChatPage() {
     sendRoomActive,
     sendRoomInactive,
     onActivate: handleSpaceActivated,
+    onBeforeInactive: (spaceId) => onBeforeInactiveRef.current(spaceId),
+  });
+
+  const {
+    scheduleReadUpTo,
+    flushPendingRead,
+    discardPendingRead,
+    resetReadReceipt,
+    selectApplicableReadEvents,
+  } = useReadReceipt({
+    sendReadUpTo,
+    isSpaceActive,
+  });
+
+  // useSpaceActivity(inactive 전환 직전 콜백)가 최신 flushPendingRead/discardPendingRead를 참조하도록 매 렌더마다 동기화한다.
+  // blur/hidden은 같은 방을 유지하므로 resetReadReceipt()가 아니라 flush + discard만 수행한다 (memberLastReadRef 보존).
+  useEffect(() => {
+    onBeforeInactiveRef.current = (spaceId) => {
+      flushPendingRead(spaceId);
+      discardPendingRead();
+    };
   });
 
   // handleMessage(ENTER_ROOM_ACK)가 최신 notifyEntered를 참조하도록 매 렌더마다 동기화한다
@@ -321,19 +317,16 @@ export default function ChatPage() {
     notifyEnteredRef.current = notifyEntered;
   });
 
-  // handleMessage(CHAT_MESSAGE)가 최신 sendReadUpTo/isSpaceActive를 참조하도록 매 렌더마다 동기화한다
+  // handleMessage(ROOM_MESSAGE_SUMMARY_UPDATED)가 최신 isSpaceActive를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
-    sendReadUpToRef.current = sendReadUpTo;
     isSpaceActiveRef.current = isSpaceActive;
   });
 
-  // 컴포넌트 unmount 시 예약된 READ_UP_TO debounce timer를 정리한다
+  // handleMessage(CHAT_MESSAGE/READ_EVENT/READ_EVENT_BATCH)가 최신 scheduleReadUpTo/selectApplicableReadEvents를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
-    const debouncer = readUpToDebouncerRef.current;
-    return () => {
-      debouncer.cancel();
-    };
-  }, []);
+    scheduleReadUpToRef.current = scheduleReadUpTo;
+    selectApplicableReadEventsRef.current = selectApplicableReadEvents;
+  });
 
   // selectedSpaceIdRef를 최신 selectedSpaceId로 동기화 (reconnect effect에서 사용)
   useEffect(() => { selectedSpaceIdRef.current = selectedSpaceId; }, [selectedSpaceId]);
@@ -351,6 +344,7 @@ export default function ChatPage() {
   }, []);
 
   // 재연결 시 state recovery: WebSocket이 false→true로 바뀌면 상태 재동기화
+  // (연결 끊김 자체의 READ 상태 정리는 아래 같은 effect의 else 분기가 담당한다 — prevConnectedRef를 공유해 true→false 전이를 구분한다)
   useEffect(() => {
     if (connected && !prevConnectedRef.current) {
       if (!isInitialConnectRef.current) {
@@ -358,105 +352,21 @@ export default function ChatPage() {
 
         const spaceId = selectedSpaceIdRef.current;
         if (spaceId !== null) {
-          memberLastReadRef.current = {};
-          readUpToDebouncerRef.current.cancel();
-          pendingReadCursorRef.current = null;
-          lastSentReadCursorRef.current = null;
-          setMessages([]);
-          setPendingMessages([]);
-          setIsLoadingMore(false);
-          setHistoryLoading(true);
-          setHistoryError(false);
-          const fetchId = ++historyFetchIdRef.current;
-          getMessageHistory(spaceId)
-            .then((result) => {
-              if (fetchId !== historyFetchIdRef.current) return;
-              if (spaceId !== selectedSpaceIdRef.current) return;
-              const { messages: msgs, lastReadMessageId, hasMore: more } = result.data;
-              setMessages((prev) => mergeMessagesById(prev, msgs ?? []));
-              setLastReadMessageId(lastReadMessageId ?? null);
-              setHasMore(more ?? false);
-              setOldestChatId(msgs?.[0]?.chatId ?? null);
-              setHistoryError(false);
-            })
-            .catch(() => {
-              if (fetchId !== historyFetchIdRef.current) return;
-              setHistoryError(true);
-            })
-            .finally(() => {
-              if (fetchId !== historyFetchIdRef.current) return;
-              setHistoryLoading(false);
-            });
+          // reconnect의 cursor 정합성 복구는 ENTER_ROOM이 아니라 recoverHistoryAfterReconnect(history 재조회)가 담당한다
+          // (백엔드 확인 결과 ENTER_ROOM은 세션 등록/in-memory active 설정만 하고 cursor catch-up이나 READ_EVENT 발행을 하지 않는다).
+          // 따라서 disconnect 이전의 local pending을 여기서 재전송하지 않는다.
+          resetReadReceipt();
+          recoverHistoryAfterReconnect(spaceId);
         }
       }
       isInitialConnectRef.current = false;
+    } else if (!connected && prevConnectedRef.current) {
+      // 실제 연결 끊김(true→false)에서만 pending READ_UP_TO를 폐기한다.
+      // 최초 마운트 시의 초기 connected=false는 prevConnectedRef.current도 초기값 false이므로 이 분기에 들어오지 않는다.
+      discardPendingRead();
     }
     prevConnectedRef.current = connected;
-  }, [connected, refreshSpaces]);
-
-  // ENTER_ROOM 전송 + 대기 상태 기록의 단일 진입점. 최초 전송(effect)과 사용자의 명시적 재시도(retryEnterRoom)가 공유한다.
-  // 같은 spaceId로 이미 보내고 ACK/ERROR를 기다리는 중이면(ref는 동기로 즉시 반영되므로 더블클릭/중복 호출에도 안전) 재전송하지 않는다.
-  // timeout 없이 ACK 또는 ERROR가 올 때까지 synchronizing 상태를 유지한다 (handleMessage의 ENTER_ROOM_ACK/ERROR 분기 참고).
-  const triggerEnterRoom = useCallback(
-    (spaceId) => {
-      if (pendingEnterRoomSpaceIdRef.current === spaceId) return;
-
-      pendingEnterRoomSpaceIdRef.current = spaceId;
-      sendEnterRoom(spaceId);
-    },
-    [sendEnterRoom]
-  );
-
-  // ENTER_ROOM 전송: 응답(ACK/ERROR)을 기다리지 않고 전송만 수행한다.
-  // enteredSpaceId/enteredSpaceIdRef는 ENTER_ROOM_ACK 수신 시에만 설정된다 (handleMessage 참고).
-  useEffect(() => {
-    if (!connected) return;
-
-    if (selectedSpaceId === null) {
-      pendingEnterRoomSpaceIdRef.current = null;
-      enteredSpaceIdRef.current = null;
-      setEnteredSpaceId(null);
-      setEnterRoomFailed(false);
-      setEnterRoomRetryable(true);
-      return;
-    }
-
-    if (enteredSpaceIdRef.current === selectedSpaceId) return;
-
-    // 중복 전송 방지는 triggerEnterRoom 내부 가드가 단일하게 담당한다
-    setEnterRoomFailed(false);
-    setEnterRoomRetryable(true);
-    triggerEnterRoom(selectedSpaceId);
-  }, [connected, selectedSpaceId, triggerEnterRoom]);
-
-  useEffect(() => {
-    if (!connected) {
-      pendingEnterRoomSpaceIdRef.current = null;
-      enteredSpaceIdRef.current = null;
-      setEnteredSpaceId(null);
-      setEnterRoomFailed(false);
-      setEnterRoomRetryable(true);
-    }
-  }, [connected]);
-
-  // ENTER_ROOM 실패 후 사용자가 명시적으로 재시도할 때만 호출된다. 자동 재시도/타이머/백오프는 없다.
-  const retryEnterRoom = useCallback(() => {
-    if (!selectedSpaceId || !connected) return;
-    // 같은 메시지로 다시 실패해도 4초 배너가 온전히 재노출되도록 먼저 비운다 (useWsErrorBanner는 값이 바뀔 때만 타이머를 재시작함)
-    setWsError(null);
-    setEnterRoomFailed(false);
-    setEnterRoomRetryable(true);
-    triggerEnterRoom(selectedSpaceId);
-  }, [selectedSpaceId, connected, setWsError, triggerEnterRoom]);
-
-  // Space 메시지 전송 가능 여부를 나타내는 connection state
-  // offline: 네트워크 끊김 / reconnecting: 소켓 재연결 중 / synchronizing: ENTER_ROOM_ACK 대기 중 / ready: ACK 수신 완료(전송 가능)
-  const connectionState = useMemo(() => {
-    if (!online) return "offline";
-    if (!connected) return "reconnecting";
-    if (selectedSpaceId !== null && enteredSpaceId !== selectedSpaceId) return "synchronizing";
-    return "ready";
-  }, [online, connected, selectedSpaceId, enteredSpaceId]);
+  }, [connected, refreshSpaces, recoverHistoryAfterReconnect, resetReadReceipt, discardPendingRead]);
 
   // 좌측 상단 UserHeader 등 앱 전체 네트워크/소켓 상태를 나타내는 global connection state
   // (ENTER_ROOM synchronization 여부는 보지 않음)
@@ -471,143 +381,19 @@ export default function ChatPage() {
     (spaceId) => {
       if (spaceId === selectedSpaceId) return;
       setPanelState(null);
-      memberLastReadRef.current = {};
-      readUpToDebouncerRef.current.cancel();
-      pendingReadCursorRef.current = null;
-      lastSentReadCursorRef.current = null;
+      // 이전 방의 pending READ_UP_TO를 best-effort로 flush한 뒤(성공/실패와 무관하게) READ 상태 전체를 reset한다.
+      // flushPendingRead는 selectedSpaceIdRef가 아니라 훅 내부 pendingRoomIdRef를 신뢰하므로, 여기서는 "이전 방"임을
+      // 명시적으로 검증하기 위해 아직 갱신 전인 selectedSpaceId(이전 값)를 expectedRoomId로 전달한다.
+      flushPendingRead(selectedSpaceId);
+      resetReadReceipt();
       setSelectedSpaceId(spaceId);
       patchSpace(spaceId, { unreadMessageCount: 0 });
-      setMessages([]);
-      setPendingMessages([]);
-      setLastReadMessageId(null);
-      setHasMore(false);
-      setOldestChatId(null);
-      setIsLoadingMore(false);
-      setHistoryLoading(true);
-      setHistoryError(false);
-      const fetchId = ++historyFetchIdRef.current;
-      getMessageHistory(spaceId)
-        .then((result) => {
-          if (fetchId !== historyFetchIdRef.current) return;
-          if (spaceId !== selectedSpaceIdRef.current) return;
-          const { messages: msgs, lastReadMessageId, hasMore: more } = result.data;
-          setMessages((prev) => mergeMessagesById(prev, msgs ?? []));
-          setLastReadMessageId(lastReadMessageId ?? null);
-          setHasMore(more ?? false);
-          setOldestChatId(msgs?.[0]?.chatId ?? null);
-          setHistoryError(false);
-        })
-        .catch(() => {
-          if (fetchId !== historyFetchIdRef.current) return;
-          setHistoryError(true);
-        })
-        .finally(() => {
-          if (fetchId !== historyFetchIdRef.current) return;
-          setHistoryLoading(false);
-        });
+      loadHistoryForSpace(spaceId);
     },
-    [selectedSpaceId, patchSpace]
+    [selectedSpaceId, patchSpace, loadHistoryForSpace, flushPendingRead, resetReadReceipt]
   );
 
   usePendingInvite({ connected, spacesLoaded, spaces, onSelectSpace: handleSelectSpace });
-
-  // 이전 메시지 로드
-  const handleLoadMore = useCallback(() => {
-    if (!hasMore || isLoadingMore || !oldestChatId) return;
-    setIsLoadingMore(true);
-    const fetchId = historyFetchIdRef.current;
-    getMessageHistory(selectedSpaceId, oldestChatId)
-      .then((result) => {
-        if (fetchId !== historyFetchIdRef.current) return;
-        const { messages: older, hasMore: more } = result.data;
-        setMessages((prev) => [...(older ?? []), ...prev]);
-        setHasMore(more ?? false);
-        setOldestChatId(older?.[0]?.chatId ?? oldestChatId);
-      })
-      .catch(() => {})
-      .finally(() => setIsLoadingMore(false));
-  }, [hasMore, isLoadingMore, oldestChatId, selectedSpaceId]);
-
-  // 메시지 history 재시도
-  const handleRetryHistory = useCallback(() => {
-    if (!selectedSpaceId) return;
-
-    setHistoryLoading(true);
-    setHistoryError(false);
-
-    const fetchId = ++historyFetchIdRef.current;
-
-    getMessageHistory(selectedSpaceId)
-      .then((result) => {
-        if (fetchId !== historyFetchIdRef.current) return;
-        if (selectedSpaceId !== selectedSpaceIdRef.current) return;
-        const { messages: msgs, lastReadMessageId, hasMore: more } = result.data;
-        setMessages((prev) => mergeMessagesById(prev, msgs ?? []));
-        setLastReadMessageId(lastReadMessageId ?? null);
-        setHasMore(more ?? false);
-        setOldestChatId(msgs?.[0]?.chatId ?? null);
-        setHistoryError(false);
-      })
-      .catch(() => {
-        if (fetchId !== historyFetchIdRef.current) return;
-        setHistoryError(true);
-      })
-      .finally(() => {
-        if (fetchId !== historyFetchIdRef.current) return;
-        setHistoryLoading(false);
-      });
-  }, [selectedSpaceId]);
-
-  // 메시지 전송
-  const handleSend = useCallback(
-    (message) => {
-      const clientMessageId = crypto.randomUUID();
-
-      setPendingMessages((prev) => [
-        ...prev,
-        {
-          clientMessageId,
-          chatRoomId: selectedSpaceId,
-          message,
-          senderId: auth?.memberId,
-          senderNickname: auth?.nickname,
-          createdDate: new Date().toISOString(),
-          status: "sending",
-          isTemporary: true,
-        },
-      ]);
-
-      sendChatMessage(selectedSpaceId, message, clientMessageId);
-    },
-    [selectedSpaceId, sendChatMessage, auth]
-  );
-
-  // failed pending message를 재시도: 같은 clientMessageId로 sendChatMessage를 재호출하고 status를 "sending"으로 되돌린다
-  const handleRetryMessage = useCallback(
-    (clientMessageId) => {
-      if (connectionState !== "ready") return;
-
-      const target = pendingMessages.find(
-        (p) => p.clientMessageId === clientMessageId && p.status === "failed"
-      );
-      if (!target) return;
-
-      setPendingMessages((prev) => markPendingMessageSending(prev, clientMessageId));
-      sendChatMessage(target.chatRoomId, target.message, clientMessageId);
-    },
-    [connectionState, pendingMessages, sendChatMessage]
-  );
-
-  // 서버 확정 메시지 + FE 전송 중 메시지를 합친 렌더링 목록
-  const renderMessages = useMemo(
-    () => [...messages, ...pendingMessages],
-    [messages, pendingMessages]
-  );
-
-  // failed pending message를 화면에서 제거 (local-only, 서버 요청 없음)
-  const handleRemoveFailedMessage = useCallback((clientMessageId) => {
-    setPendingMessages((prev) => removePendingByClientMessageId(prev, clientMessageId));
-  }, []);
 
   // 채팅방 나가기
   const handleLeaveRoom = useCallback(async () => {
@@ -615,13 +401,15 @@ export default function ChatPage() {
     const spaceId = selectedSpaceId;
     try {
       await leaveSpace(spaceId);
+      // 서버에서 이미 방을 나갔으므로(ROOM_NOT_JOINED) flush는 시도하지 않고 로컬 READ 상태만 정리한다
+      resetReadReceipt();
       setSelectedSpaceId(null);
       setPanelState(null);
       removeSpace(spaceId);
     } catch (e) {
       // ignore
     }
-  }, [selectedSpaceId, removeSpace]);
+  }, [selectedSpaceId, removeSpace, resetReadReceipt]);
 
   // 채팅방 이름 변경
   const handleRenameRoom = useCallback(async (newTitle) => {
@@ -650,8 +438,11 @@ export default function ChatPage() {
   }, []);
 
   const handleBack = useCallback(() => {
+    // 방 선택 해제는 사실상 방을 떠나는 동작이므로 방 전환과 동일한 순서로 정리한다
+    flushPendingRead(selectedSpaceId);
+    resetReadReceipt();
     setSelectedSpaceId(null);
-  }, []);
+  }, [selectedSpaceId, flushPendingRead, resetReadReceipt]);
 
   const handleToggleMembers = useCallback(() => {
     setPanelState((p) => (p?.type === "members" ? null : { type: "members" }));
@@ -714,7 +505,7 @@ export default function ChatPage() {
               connectionState={connectionState}
               enterRoomFailed={enterRoomFailed}
               enterRoomRetryable={enterRoomRetryable}
-              onRetryEnterRoom={retryEnterRoom}
+              onRetryEnterRoom={handleRetryEnterRoom}
               hasMore={hasMore}
               isLoadingMore={isLoadingMore}
               onLoadMore={handleLoadMore}

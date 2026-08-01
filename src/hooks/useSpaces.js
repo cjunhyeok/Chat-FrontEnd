@@ -17,7 +17,6 @@ export function useSpaces(selectedSpaceId) {
   useEffect(() => {
     getSpaces()
       .then((result) => {
-        // 초기 GET이 진행되는 동안 이미 WebSocket summary가 반영됐을 수 있으므로 단순 교체가 아닌 병합을 적용한다.
         setSpaces((prev) => mergeSpaceSnapshot(prev, result.data ?? []));
         setSpacesError(false);
       })

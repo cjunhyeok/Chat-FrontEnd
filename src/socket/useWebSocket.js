@@ -4,10 +4,9 @@ const WS_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8080/ws/chat";
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_MS = 3000;
 
-export function useWebSocket(onMessage, onConnected) {
+export function useWebSocket(onMessage) {
   const socketRef = useRef(null);
   const onMessageRef = useRef(onMessage);
-  const onConnectedRef = useRef(onConnected);
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const manualCloseRef = useRef(false);
@@ -19,9 +18,6 @@ export function useWebSocket(onMessage, onConnected) {
   useEffect(() => {
     onMessageRef.current = onMessage;
   });
-  useEffect(() => {
-    onConnectedRef.current = onConnected;
-  });
 
   const connect = useCallback(() => {
     if (socketRef.current?.readyState === WebSocket.OPEN) return;
@@ -31,11 +27,8 @@ export function useWebSocket(onMessage, onConnected) {
 
     socket.onopen = () => {
       setConnected(true);
-      window.__orbitSocket = socket;
       setReconnecting(false);
       reconnectCountRef.current = 0;
-      // 연결(재연결) 완료 시 콜백 호출
-      onConnectedRef.current?.();
     };
 
     socket.onmessage = (event) => {
@@ -105,12 +98,18 @@ export function useWebSocket(onMessage, onConnected) {
     );
   }, []);
 
-  // READ_UP_TO: 현재 room에서 lastReadMessageId까지 읽었음을 서버에 알림 (ChatPage에서 debounce 후 호출)
+  // READ_UP_TO: 현재 room에서 lastReadMessageId까지 읽었음을 서버에 알림 (useReadReceipt가 throttle 후 호출)
+  // 반환값은 서버 처리 성공/ACK를 의미하지 않는다 — socket이 OPEN이고 send()가 동기 예외 없이 실행됐는지만 나타낸다.
   const sendReadUpTo = useCallback((chatRoomId, lastReadMessageId) => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(
-      JSON.stringify({ messageType: "READ_UP_TO", chatRoomId, lastReadMessageId })
-    );
+    if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
+    try {
+      socketRef.current.send(
+        JSON.stringify({ messageType: "READ_UP_TO", chatRoomId, lastReadMessageId })
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
   }, []);
 
   const sendDiscussionMessage = useCallback((discussionId, content) => {

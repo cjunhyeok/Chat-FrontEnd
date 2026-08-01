@@ -10,7 +10,7 @@ import { useEffect, useRef, useCallback } from "react";
  * 핵심 원칙: activeSpaceIdRef는 전송 결정과 동시에(전송 호출 이전에) 갱신한다.
  * 이렇게 해야 어떤 코드가 ref를 읽더라도 전송 의도와 일치하는 상태를 본다.
  */
-export function useSpaceActivity({ selectedSpaceId, connected, sendRoomActive, sendRoomInactive, onActivate }) {
+export function useSpaceActivity({ selectedSpaceId, connected, sendRoomActive, sendRoomInactive, onActivate, onBeforeInactive }) {
   // document가 현재 보이는 상태인지 (다른 탭으로 이동하면 false)
   const isDocumentVisibleRef = useRef(!document.hidden);
   // window가 현재 포커스된 상태인지 (Alt+Tab 등으로 앱 전환하면 false)
@@ -27,10 +27,14 @@ export function useSpaceActivity({ selectedSpaceId, connected, sendRoomActive, s
   const connectedRef = useRef(connected);
   // ChatPage가 매 렌더마다 새 함수를 넘겨도 이벤트 리스너/콜백을 재등록하지 않도록 ref로 최신 콜백만 동기화한다
   const onActivateRef = useRef(onActivate);
+  // inactive로 전환되기 직전(ROOM_INACTIVE 전송/activeSpaceIdRef 해제 이전)에 호출된다.
+  // READ cursor 상태는 이 hook이 알지 못하므로, 처리 책임은 전적으로 ChatPage가 주입하는 콜백에 위임한다.
+  const onBeforeInactiveRef = useRef(onBeforeInactive);
 
   useEffect(() => { selectedSpaceIdRef.current = selectedSpaceId; }, [selectedSpaceId]);
   useEffect(() => { connectedRef.current = connected; }, [connected]);
   useEffect(() => { onActivateRef.current = onActivate; }, [onActivate]);
+  useEffect(() => { onBeforeInactiveRef.current = onBeforeInactive; }, [onBeforeInactive]);
 
   /**
    * 현재 창 상태(visible + focused)를 기준으로 ACTIVE/INACTIVE를 동기화한다.
@@ -63,9 +67,15 @@ export function useSpaceActivity({ selectedSpaceId, connected, sendRoomActive, s
       // inactive가 되어야 하는데 현재 active로 표시된 방이 있을 때만 전송
       const spaceToDeactivate = activeSpaceIdRef.current;
       if (spaceToDeactivate !== null) {
-        // ref를 먼저 null로 갱신한 뒤 전송 → 전송 후 focus가 와도 null 상태에서 ROOM_ACTIVE 전송
-        activeSpaceIdRef.current = null;
-        sendRoomInactive(spaceToDeactivate);
+        // 같은 spaceToDeactivate !== null 가드 안에 있으므로 blur+visibilitychange가 연속 발생해도 1회만 호출된다.
+        // 콜백에서 예외가 나도 activity 상태 해제와 ROOM_INACTIVE 전송은 반드시 이어져야 하므로 try/finally로 감싼다.
+        try {
+          onBeforeInactiveRef.current?.(spaceToDeactivate);
+        } finally {
+          // ref를 먼저 null로 갱신한 뒤 전송 → 전송 후 focus가 와도 null 상태에서 ROOM_ACTIVE 전송
+          activeSpaceIdRef.current = null;
+          sendRoomInactive(spaceToDeactivate);
+        }
       }
     }
   }, [sendRoomActive, sendRoomInactive]);
