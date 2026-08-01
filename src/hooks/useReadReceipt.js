@@ -139,6 +139,49 @@ export function useReadReceipt({ sendReadUpTo, isSpaceActive }) {
     return true;
   }, []);
 
+  // READ_EVENT_BATCH(및 단건 READ_EVENT를 배열 1개로 감싼 값)에서 실제로 적용해야 할 read만 골라낸다.
+  // - malformed item(null, memberId/currentLastReadChatId 없음)은 조용히 무시한다.
+  // - 같은 batch 안에 동일 memberId가 여러 번 있으면 서버 accumulator와 동일한 정책으로 병합한다
+  //   (병합하지 않고 각 item을 그대로 순서대로 적용하면 겹치는 (previous, current] 범위가 messages에 중복 반영될 수 있다).
+  // - 멤버별 stale/역행 판단은 기존 shouldApplyReadEvent를 그대로 재사용한다(로직 복제 없음).
+  const selectApplicableReadEvents = useCallback((reads) => {
+    if (!Array.isArray(reads)) return [];
+
+    const mergedByMemberId = new Map();
+
+    for (const read of reads) {
+      if (read == null) continue;
+      const { memberId, currentLastReadChatId } = read;
+      if (memberId == null || currentLastReadChatId == null) continue;
+      const previousLastReadChatId = read.previousLastReadChatId ?? null;
+
+      const existing = mergedByMemberId.get(memberId);
+      if (existing == null) {
+        mergedByMemberId.set(memberId, { memberId, previousLastReadChatId, currentLastReadChatId });
+        continue;
+      }
+
+      const mergedPrevious =
+        existing.previousLastReadChatId === null || previousLastReadChatId === null
+          ? null
+          : Math.min(existing.previousLastReadChatId, previousLastReadChatId);
+      const mergedCurrent = Math.max(existing.currentLastReadChatId, currentLastReadChatId);
+      mergedByMemberId.set(memberId, {
+        memberId,
+        previousLastReadChatId: mergedPrevious,
+        currentLastReadChatId: mergedCurrent,
+      });
+    }
+
+    const applicable = [];
+    for (const event of mergedByMemberId.values()) {
+      if (shouldApplyReadEvent(event)) {
+        applicable.push(event);
+      }
+    }
+    return applicable;
+  }, [shouldApplyReadEvent]);
+
   // 방 전환 / 재연결 시 READ lifecycle 전체를 초기화한다. discardPendingRead()를 재사용해 중복을 줄인다.
   const resetReadReceipt = useCallback(() => {
     memberLastReadRef.current = {};
@@ -154,5 +197,12 @@ export function useReadReceipt({ sendReadUpTo, isSpaceActive }) {
     };
   }, [cancelTrailingTimer]);
 
-  return { scheduleReadUpTo, flushPendingRead, discardPendingRead, resetReadReceipt, shouldApplyReadEvent };
+  return {
+    scheduleReadUpTo,
+    flushPendingRead,
+    discardPendingRead,
+    resetReadReceipt,
+    shouldApplyReadEvent,
+    selectApplicableReadEvents,
+  };
 }

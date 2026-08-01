@@ -50,7 +50,7 @@ export default function ChatPage() {
   const notifyEnteredRef = useRef(() => {});
   // handleMessage가 useRoomHistory/useRoomEntry보다 먼저 선언되어 최신 핸들러를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const handleChatMessageRef = useRef(() => {});
-  const handleReadEventRef = useRef(() => {});
+  const handleReadEventBatchRef = useRef(() => {});
   const handleChatMessageErrorRef = useRef(() => {});
   const handleDiscussionMessageCountRef = useRef(() => {});
   const clearMessagesRef = useRef(() => {});
@@ -62,7 +62,7 @@ export default function ChatPage() {
   const isSpaceActiveRef = useRef(() => false);
   // handleMessage가 useReadReceipt보다 먼저 선언되어 최신 함수를 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const scheduleReadUpToRef = useRef(() => {});
-  const shouldApplyReadEventRef = useRef(() => false);
+  const selectApplicableReadEventsRef = useRef(() => []);
   // useSpaceActivity(inactive 전환 직전 콜백)가 useReadReceipt보다 먼저 선언되어 최신 flushPendingRead/discardPendingRead를
   // 직접 참조할 수 없으므로 ref로 우회한다 (notifyEnteredRef와 동일한 이유)
   const onBeforeInactiveRef = useRef(() => {});
@@ -70,6 +70,18 @@ export default function ChatPage() {
   // WebSocket 수신 메시지 처리
   const handleMessage = useCallback(
     (data) => {
+      // READ_EVENT/READ_EVENT_BATCH 공통 처리: 현재 방 검증 → 유효성 검사/중복 병합/stale 판단(useReadReceipt) →
+      // 통과한 read만 한 번의 messages 반영(useRoomHistory)으로 전달한다. reads가 배열이 아니거나 비어 있으면 조용히 무시한다.
+      const applyReadEventReads = (chatRoomId, reads) => {
+        if (chatRoomId !== selectedSpaceIdRef.current) return;
+        if (!Array.isArray(reads) || reads.length === 0) return;
+
+        const applicableReads = selectApplicableReadEventsRef.current(reads);
+        if (applicableReads.length === 0) return;
+
+        handleReadEventBatchRef.current(applicableReads);
+      };
+
       switch (data.messageType) {
         case "CHAT_MESSAGE":
           if (data.chatRoomId === selectedSpaceIdRef.current) {
@@ -90,14 +102,15 @@ export default function ChatPage() {
           applyMessageSummary(data, isSpaceActiveRef.current(data.chatRoomId));
           break;
 
-        case "READ_EVENT": {
-          if (data.chatRoomId !== selectedSpaceIdRef.current) break;
-          if (!shouldApplyReadEventRef.current(data)) break;
-
-          handleReadEventRef.current(data);
-
+        // READ_EVENT(단건)와 READ_EVENT_BATCH(배열)는 같은 경로(applyReadEventReads)로 합류한다 —
+        // 단건은 배열 1개로 감싸 전달할 뿐, 유효성 검사·중복 병합·stale 판단·messages 반영 로직은 완전히 동일하다.
+        case "READ_EVENT":
+          applyReadEventReads(data.chatRoomId, [data]);
           break;
-        }
+
+        case "READ_EVENT_BATCH":
+          applyReadEventReads(data.chatRoomId, data.reads);
+          break;
 
         case "DISCUSSION_MESSAGE_EVENT":
           if (data.spaceId !== selectedSpaceIdRef.current) break;
@@ -244,7 +257,7 @@ export default function ChatPage() {
     handleLoadMore,
     handleChatMessage,
     handleChatMessageError,
-    handleReadEvent,
+    handleReadEventBatch,
     handleDiscussionMessageCount,
     handleSend,
     handleRetryMessage,
@@ -255,7 +268,7 @@ export default function ChatPage() {
   // handleMessage가 useRoomHistory보다 먼저 선언되어 최신 핸들러를 직접 참조할 수 없으므로 ref로 동기화한다 (notifyEnteredRef와 동일한 이유)
   useEffect(() => {
     handleChatMessageRef.current = handleChatMessage;
-    handleReadEventRef.current = handleReadEvent;
+    handleReadEventBatchRef.current = handleReadEventBatch;
     handleChatMessageErrorRef.current = handleChatMessageError;
     handleDiscussionMessageCountRef.current = handleDiscussionMessageCount;
     clearMessagesRef.current = clearMessages;
@@ -284,7 +297,7 @@ export default function ChatPage() {
     flushPendingRead,
     discardPendingRead,
     resetReadReceipt,
-    shouldApplyReadEvent,
+    selectApplicableReadEvents,
   } = useReadReceipt({
     sendReadUpTo,
     isSpaceActive,
@@ -309,10 +322,10 @@ export default function ChatPage() {
     isSpaceActiveRef.current = isSpaceActive;
   });
 
-  // handleMessage(CHAT_MESSAGE/READ_EVENT)가 최신 scheduleReadUpTo/shouldApplyReadEvent를 참조하도록 매 렌더마다 동기화한다
+  // handleMessage(CHAT_MESSAGE/READ_EVENT/READ_EVENT_BATCH)가 최신 scheduleReadUpTo/selectApplicableReadEvents를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
     scheduleReadUpToRef.current = scheduleReadUpTo;
-    shouldApplyReadEventRef.current = shouldApplyReadEvent;
+    selectApplicableReadEventsRef.current = selectApplicableReadEvents;
   });
 
   // selectedSpaceIdRef를 최신 selectedSpaceId로 동기화 (reconnect effect에서 사용)

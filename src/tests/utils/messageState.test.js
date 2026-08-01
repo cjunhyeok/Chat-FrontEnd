@@ -1,4 +1,4 @@
-import { mergeMessagesById, mergeDiscussionMessagesById, applyReadEvent, removePendingByClientMessageId, markPendingMessageFailed, markPendingMessageSending } from '../../utils/messageState';
+import { mergeMessagesById, mergeDiscussionMessagesById, applyReadEvent, applyReadEvents, removePendingByClientMessageId, markPendingMessageFailed, markPendingMessageSending } from '../../utils/messageState';
 
 test('history 응답이 늦게 도착해도 동일 chatId 메시지는 중복되지 않는다', () => {
   // WS로 먼저 도착한 메시지가 READ_EVENT로 갱신된 상태
@@ -162,6 +162,63 @@ test('READ_EVENT로_갱신된_prev는_뒤늦게_도착한_stale_REST_응답에_�
   expect(result).toHaveLength(1);
   expect(result[0].chatId).toBe(4);
   expect(result[0].unreadMemberCount).toBe(2);
+});
+
+// ── applyReadEvents (READ_EVENT_BATCH) ──────────────────────────────────────
+
+test('readEvents가 비어 있으면 messages를 그대로(같은 참조로) 반환한다', () => {
+  const messages = [{ chatId: 1, senderId: 99, unreadMemberCount: 3 }];
+
+  const result = applyReadEvents(messages, []);
+
+  expect(result).toBe(messages);
+});
+
+test('batch의 여러 read item이 한 번의 순회로 모두 반영된다', () => {
+  const messages = [
+    { chatId: 1, senderId: 99, unreadMemberCount: 2 },
+    { chatId: 2, senderId: 99, unreadMemberCount: 2 },
+  ];
+  const readEvents = [
+    { memberId: 10, previousLastReadChatId: null, currentLastReadChatId: 1 },
+    { memberId: 11, previousLastReadChatId: 1, currentLastReadChatId: 2 },
+  ];
+
+  const result = applyReadEvents(messages, readEvents);
+
+  // chatId 1: member 10만 읽음 범위에 포함 → 1감소
+  expect(result[0].unreadMemberCount).toBe(1);
+  // chatId 2: member 11만 읽음 범위에 포함 → 1감소
+  expect(result[1].unreadMemberCount).toBe(1);
+});
+
+test('applyReadEvent를 배열로 반복 적용한 결과와 applyReadEvents의 결과는 동일하다', () => {
+  const messages = [
+    { chatId: 1, senderId: 99, unreadMemberCount: 3 },
+    { chatId: 2, senderId: 99, unreadMemberCount: 3 },
+    { chatId: 3, senderId: 99, unreadMemberCount: 3 },
+  ];
+  const readEvents = [
+    { memberId: 10, previousLastReadChatId: null, currentLastReadChatId: 2 },
+    { memberId: 11, previousLastReadChatId: 1, currentLastReadChatId: 3 },
+  ];
+
+  const sequential = readEvents.reduce((acc, e) => applyReadEvent(acc, e), messages);
+  const batched = applyReadEvents(messages, readEvents);
+
+  expect(batched).toEqual(sequential);
+});
+
+test('unreadMemberCount는 batch 적용 후에도 0 아래로 내려가지 않는다', () => {
+  const messages = [{ chatId: 1, senderId: 99, unreadMemberCount: 0 }];
+  const readEvents = [
+    { memberId: 10, previousLastReadChatId: null, currentLastReadChatId: 1 },
+    { memberId: 11, previousLastReadChatId: null, currentLastReadChatId: 1 },
+  ];
+
+  const result = applyReadEvents(messages, readEvents);
+
+  expect(result[0].unreadMemberCount).toBe(0);
 });
 
 // ── removePendingByClientMessageId ──────────────────────────────────────────

@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { getMessageHistory } from "../api/messageApi";
 import {
   mergeMessagesById,
-  applyReadEvent,
+  applyReadEvents,
   removePendingByClientMessageId,
   markPendingMessageFailed,
   markPendingMessageSending,
@@ -138,9 +138,12 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     );
   }, []);
 
-  // WebSocket READ_EVENT 반영 — 호출 측이 room/member cursor 검증을 마친 이벤트만 전달한다.
-  const handleReadEvent = useCallback((data) => {
-    setMessages((prev) => applyReadEvent(prev, data));
+  // WebSocket READ_EVENT/READ_EVENT_BATCH 반영 — 호출 측(ChatPage)이 room 일치 검사와 멤버별
+  // 중복 병합·stale 판단(useReadReceipt.selectApplicableReadEvents)을 마친 이벤트 배열만 전달한다.
+  // 단건 READ_EVENT도 배열 1개로 감싸 동일한 경로를 타므로, item 개수와 무관하게 setMessages는 한 번만 호출된다.
+  const handleReadEventBatch = useCallback((readEvents) => {
+    if (!readEvents || readEvents.length === 0) return;
+    setMessages((prev) => applyReadEvents(prev, readEvents));
   }, []);
 
   // WebSocket DISCUSSION_MESSAGE_EVENT 반영 — 호출 측이 dedup(discussionMessageId) 판단을 마친 이벤트만 전달한다.
@@ -232,7 +235,7 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     handleLoadMore,
     handleChatMessage,
     handleChatMessageError,
-    handleReadEvent,
+    handleReadEventBatch,
     handleDiscussionMessageCount,
     handleSend,
     handleRetryMessage,

@@ -556,3 +556,150 @@ describe("shouldApplyReadEvent", () => {
     expect(applied).toBe(true);
   });
 });
+
+describe("selectApplicableReadEvents", () => {
+  test("단건 item 배열([data])을 그대로 적용 가능한 이벤트로 반환한다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+      ]);
+    });
+
+    expect(applicable).toEqual([
+      { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+    ]);
+  });
+
+  test("같은 방의 서로 다른 member는 모두 적용 가능한 이벤트로 반환된다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+        { memberId: 2, previousLastReadChatId: null, currentLastReadChatId: 5 },
+      ]);
+    });
+
+    expect(applicable).toHaveLength(2);
+    expect(applicable.map((e) => e.memberId).sort()).toEqual([1, 2]);
+  });
+
+  test("previousLastReadChatId가 null인 최초 읽음 이벤트도 정상 처리된다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 5 },
+      ]);
+    });
+
+    expect(applicable[0]).toEqual({ memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 5 });
+  });
+
+  test("같은 batch 안에 동일 memberId가 여러 번 있으면 가장 큰 current, previous는 null 우선/최솟값으로 병합된다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+        { memberId: 1, previousLastReadChatId: 105, currentLastReadChatId: 120 },
+      ]);
+    });
+
+    expect(applicable).toEqual([
+      { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 120 },
+    ]);
+  });
+
+  test("병합 시 previous 중 하나라도 null이면 병합된 previous도 null이다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 105 },
+        { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+      ]);
+    });
+
+    expect(applicable[0].previousLastReadChatId).toBeNull();
+    expect(applicable[0].currentLastReadChatId).toBe(110);
+  });
+
+  test("이미 반영된 cursor보다 작거나 같은 current는 제외된다(단조성 유지)", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 100, currentLastReadChatId: 110 },
+      ]);
+    });
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 105, currentLastReadChatId: 110 }, // 동일 current
+      ]);
+    });
+    expect(applicable).toHaveLength(0);
+
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 105, currentLastReadChatId: 108 }, // 더 낮은 current
+      ]);
+    });
+    expect(applicable).toHaveLength(0);
+  });
+
+  test("memberId 또는 currentLastReadChatId가 없는 malformed item은 무시하고 나머지 유효 item은 처리한다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        null,
+        { previousLastReadChatId: 100, currentLastReadChatId: 110 }, // memberId 없음
+        { memberId: 2, previousLastReadChatId: 100 }, // currentLastReadChatId 없음
+        { memberId: 3, previousLastReadChatId: null, currentLastReadChatId: 50 }, // 유효
+      ]);
+    });
+
+    expect(applicable).toEqual([
+      { memberId: 3, previousLastReadChatId: null, currentLastReadChatId: 50 },
+    ]);
+  });
+
+  test("reads가 배열이 아니면 빈 배열을 반환한다", () => {
+    const { result } = setup();
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents(null);
+    });
+
+    expect(applicable).toEqual([]);
+  });
+
+  test("shouldApplyReadEvent와 memberLastReadRef 상태를 공유한다 — batch 처리 후 단건 READ_EVENT도 동일하게 stale 판단된다", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 110 },
+      ]);
+    });
+
+    let applied;
+    act(() => {
+      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 100 });
+    });
+
+    expect(applied).toBe(false);
+  });
+});

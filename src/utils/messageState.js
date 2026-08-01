@@ -71,33 +71,56 @@ export function markPendingMessageSending(pendingMessages, clientMessageId) {
 }
 
 /**
- * READ_EVENT를 받아 messages 배열에 unreadMemberCount 감소를 적용한다.
+ * 메시지 하나에 READ_EVENT 하나를 적용한 결과를 반환한다 (applyReadEvent/applyReadEvents가 공유하는 핵심 로직).
  *
  * 정책:
  * - previousLastReadChatId < chatId <= currentLastReadChatId 범위에 해당하는 메시지만 대상
  * - 이벤트를 발생시킨 멤버 본인의 메시지는 제외
  * - unreadMemberCount는 0 아래로 내려가지 않는다
+ */
+function applyReadEventToMessage(msg, readEvent) {
+  const previous = readEvent.previousLastReadChatId;
+  const current = readEvent.currentLastReadChatId;
+  const inRange =
+    (previous === null || msg.chatId > previous) &&
+    msg.chatId <= current;
+  const isReadMemberOwnMessage = msg.senderId === readEvent.memberId;
+  if (!inRange || isReadMemberOwnMessage) {
+    return msg;
+  }
+  return {
+    ...msg,
+    unreadMemberCount: Math.max(0, msg.unreadMemberCount - 1),
+  };
+}
+
+/**
+ * READ_EVENT를 받아 messages 배열에 unreadMemberCount 감소를 적용한다.
  *
  * @param {Array<{chatId: number, senderId: number, unreadMemberCount: number}>} messages
  * @param {{ memberId: number, previousLastReadChatId: number|null, currentLastReadChatId: number }} readEvent
  * @returns {Array}
  */
 export function applyReadEvent(messages, readEvent) {
-  const previous = readEvent.previousLastReadChatId;
-  const current = readEvent.currentLastReadChatId;
-  return messages.map((msg) => {
-    const inRange =
-      (previous === null || msg.chatId > previous) &&
-      msg.chatId <= current;
-    const isReadMemberOwnMessage = msg.senderId === readEvent.memberId;
-    if (!inRange || isReadMemberOwnMessage) {
-      return msg;
-    }
-    return {
-      ...msg,
-      unreadMemberCount: Math.max(0, msg.unreadMemberCount - 1),
-    };
-  });
+  return messages.map((msg) => applyReadEventToMessage(msg, readEvent));
+}
+
+/**
+ * READ_EVENT_BATCH(또는 단건을 배열 1개로 감싼 값)를 messages에 한 번의 순회로 적용한다.
+ * readEvents의 각 항목은 이미 멤버별 중복 병합·stale 판단(useReadReceipt.selectApplicableReadEvents)을
+ * 마친 상태여야 한다 — 여기서는 적용 로직만 재사용한다.
+ *
+ * readEvents가 비어 있으면 messages를 그대로 반환한다(참조 유지 — 불필요한 리렌더 방지).
+ *
+ * @param {Array<{chatId: number, senderId: number, unreadMemberCount: number}>} messages
+ * @param {Array<{ memberId: number, previousLastReadChatId: number|null, currentLastReadChatId: number }>} readEvents
+ * @returns {Array}
+ */
+export function applyReadEvents(messages, readEvents) {
+  if (!readEvents || readEvents.length === 0) return messages;
+  return messages.map((msg) =>
+    readEvents.reduce((acc, readEvent) => applyReadEventToMessage(acc, readEvent), msg)
+  );
 }
 
 /**
