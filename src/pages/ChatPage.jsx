@@ -70,7 +70,7 @@ export default function ChatPage() {
   // WebSocket 수신 메시지 처리
   const handleMessage = useCallback(
     (data) => {
-      // READ_EVENT/READ_EVENT_BATCH 공통 처리: 현재 방 검증 → 유효성 검사/중복 병합/stale 판단(useReadReceipt) →
+      // READ_EVENT_BATCH 처리: 현재 방 검증 → 유효성 검사/중복 병합/stale 판단(useReadReceipt) →
       // 통과한 read만 한 번의 messages 반영(useRoomHistory)으로 전달한다. reads가 배열이 아니거나 비어 있으면 조용히 무시한다.
       const applyReadEventReads = (chatRoomId, reads) => {
         if (chatRoomId !== selectedSpaceIdRef.current) return;
@@ -100,12 +100,6 @@ export default function ChatPage() {
 
         case "ROOM_MESSAGE_SUMMARY_UPDATED":
           applyMessageSummary(data, isSpaceActiveRef.current(data.chatRoomId));
-          break;
-
-        // READ_EVENT(단건)와 READ_EVENT_BATCH(배열)는 같은 경로(applyReadEventReads)로 합류한다 —
-        // 단건은 배열 1개로 감싸 전달할 뿐, 유효성 검사·중복 병합·stale 판단·messages 반영 로직은 완전히 동일하다.
-        case "READ_EVENT":
-          applyReadEventReads(data.chatRoomId, [data]);
           break;
 
         case "READ_EVENT_BATCH":
@@ -322,7 +316,7 @@ export default function ChatPage() {
     isSpaceActiveRef.current = isSpaceActive;
   });
 
-  // handleMessage(CHAT_MESSAGE/READ_EVENT/READ_EVENT_BATCH)가 최신 scheduleReadUpTo/selectApplicableReadEvents를 참조하도록 매 렌더마다 동기화한다
+  // handleMessage(CHAT_MESSAGE/READ_EVENT_BATCH)가 최신 scheduleReadUpTo/selectApplicableReadEvents를 참조하도록 매 렌더마다 동기화한다
   useEffect(() => {
     scheduleReadUpToRef.current = scheduleReadUpTo;
     selectApplicableReadEventsRef.current = selectApplicableReadEvents;
