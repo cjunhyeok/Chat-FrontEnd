@@ -1,5 +1,6 @@
 import { renderHook, act } from "@testing-library/react";
 import { useReadReceipt } from "../../hooks/useReadReceipt";
+import { applyReadEvents } from "../../utils/messageState";
 
 const THROTTLE_MS = 1000;
 
@@ -450,110 +451,190 @@ describe("unmount", () => {
   });
 });
 
-describe("shouldApplyReadEvent", () => {
-  test("멤버의 첫 이벤트는 true를 반환한다", () => {
+describe("resolveApplicableReadEvent", () => {
+  test("멤버의 첫 이벤트는 그대로(previous 보정 없이) 반환된다", () => {
     const { result } = setup();
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1,
+        previousLastReadChatId: 90,
+        currentLastReadChatId: 99,
+      });
     });
 
-    expect(applied).toBe(true);
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 99 });
   });
 
-  test("동일 cursor는 false를 반환한다", () => {
+  test("동일 cursor는 null을 반환한다", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
     });
 
-    expect(applied).toBe(false);
+    expect(resolved).toBeNull();
   });
 
-  test("더 낮은 cursor는 false를 반환한다", () => {
+  test("더 낮은 cursor(역순 이벤트)는 null을 반환한다", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100,
+      });
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 3 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 99,
+      });
     });
 
-    expect(applied).toBe(false);
+    expect(resolved).toBeNull();
   });
 
-  test("더 높은 cursor는 true를 반환한다", () => {
+  test("정상 순차 이벤트는 previous가 그대로 유지된다", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 99,
+      });
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 8 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100,
+      });
     });
 
-    expect(applied).toBe(true);
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100 });
+  });
+
+  test("겹치는 이벤트는 previous가 이미 반영한 cursor(lastProcessed)로 보정된다", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 80, currentLastReadChatId: 99,
+      });
+    });
+
+    let resolved;
+    act(() => {
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100,
+      });
+    });
+
+    // 원본 (90,100]이 아니라, 이미 반영된 99까지를 하한으로 하는 (99,100]으로 보정되어야 한다
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100 });
+  });
+
+  test("event.previous가 null이고 lastProcessed도 null이면 previous는 null로 유지된다", () => {
+    const { result } = setup();
+
+    let resolved;
+    act(() => {
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 100,
+      });
+    });
+
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 100 });
+  });
+
+  test("event.previous가 null이고 lastProcessed가 존재하면 previous는 lastProcessed로 보정된다", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 99,
+      });
+    });
+
+    let resolved;
+    act(() => {
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: null, currentLastReadChatId: 100,
+      });
+    });
+
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100 });
   });
 
   test("서로 다른 memberId는 독립적으로 판단한다", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 2, currentLastReadChatId: 5 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 2, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
     });
 
-    expect(applied).toBe(true);
+    expect(resolved).toEqual({ memberId: 2, previousLastReadChatId: 0, currentLastReadChatId: 5 });
   });
 
   test("discardPendingRead 이후에는 memberLastReadRef가 보존된다 (blur/hidden 정책)", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
       result.current.discardPendingRead();
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 3 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 3,
+      });
     });
 
-    // discardPendingRead는 memberLastReadRef를 건드리지 않으므로 여전히 낮은 cursor(3)는 false여야 한다
-    expect(applied).toBe(false);
+    // discardPendingRead는 memberLastReadRef를 건드리지 않으므로 여전히 낮은 cursor(3)는 null이어야 한다
+    expect(resolved).toBeNull();
   });
 
   test("resetReadReceipt 이후에는 이전 cursor 상태가 제거된다", () => {
     const { result } = setup();
 
     act(() => {
-      result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 5 });
+      result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 5,
+      });
       result.current.resetReadReceipt();
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 3 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 3,
+      });
     });
 
-    // reset 후에는 이전 cursor(5)가 사라졌으므로 더 낮은 cursor(3)도 다시 true로 판단된다
-    expect(applied).toBe(true);
+    // reset 후에는 이전 cursor(5)가 사라졌으므로 더 낮은 cursor(3)도 다시 적용 가능으로 판단된다
+    expect(resolved).toEqual({ memberId: 1, previousLastReadChatId: 0, currentLastReadChatId: 3 });
   });
 });
 
@@ -686,7 +767,7 @@ describe("selectApplicableReadEvents", () => {
     expect(applicable).toEqual([]);
   });
 
-  test("shouldApplyReadEvent와 memberLastReadRef 상태를 공유한다 — batch 처리 후 단건 READ_EVENT도 동일하게 stale 판단된다", () => {
+  test("resolveApplicableReadEvent와 memberLastReadRef 상태를 공유한다 — batch 처리 후 단건 READ_EVENT도 동일하게 stale 판단된다", () => {
     const { result } = setup();
 
     act(() => {
@@ -695,11 +776,121 @@ describe("selectApplicableReadEvents", () => {
       ]);
     });
 
-    let applied;
+    let resolved;
     act(() => {
-      applied = result.current.shouldApplyReadEvent({ memberId: 1, currentLastReadChatId: 100 });
+      resolved = result.current.resolveApplicableReadEvent({
+        memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100,
+      });
     });
 
-    expect(applied).toBe(false);
+    expect(resolved).toBeNull();
+  });
+
+  test("겹치는 이벤트는 previous가 이미 반영한 cursor로 보정되어 반환된다", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 80, currentLastReadChatId: 99 },
+      ]);
+    });
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100 },
+      ]);
+    });
+
+    // 원본 previous(90)가 아니라 이미 반영된 99로 보정된 (99,100]만 남아야 한다
+    expect(applicable).toEqual([
+      { memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100 },
+    ]);
+  });
+
+  test("서로 다른 호출(batch)에 걸쳐 겹치는 경우에도 두 번째 호출은 보정된 범위만 반환한다", () => {
+    const { result } = setup();
+
+    let firstCall;
+    act(() => {
+      firstCall = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 99 },
+      ]);
+    });
+    expect(firstCall).toEqual([
+      { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 99 },
+    ]);
+
+    let secondCall;
+    act(() => {
+      secondCall = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100 },
+      ]);
+    });
+
+    expect(secondCall).toEqual([
+      { memberId: 1, previousLastReadChatId: 99, currentLastReadChatId: 100 },
+    ]);
+  });
+
+  test("같은 batch 안의 동일 memberId merge(min(previous)/max(current))는 겹침 보정 이전에 그대로 유지된다", () => {
+    const { result } = setup();
+
+    act(() => {
+      result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 95 },
+      ]);
+    });
+
+    let applicable;
+    act(() => {
+      applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 80, currentLastReadChatId: 99 },
+        { memberId: 1, previousLastReadChatId: 85, currentLastReadChatId: 110 },
+      ]);
+    });
+
+    // batch 내부 merge 결과는 (min(80,85)=80, max(99,110)=110) → (80,110]
+    // 이어서 lastProcessed=95와 겹침 보정: effectivePrevious = max(80, 95) = 95 → (95,110]
+    expect(applicable).toEqual([
+      { memberId: 1, previousLastReadChatId: 95, currentLastReadChatId: 110 },
+    ]);
+  });
+
+  test("겹치는 두 batch를 selectApplicableReadEvents → applyReadEvents로 연결해도 91~99는 한 번만, 100은 새로 감소한다", () => {
+    const { result } = setup();
+
+    let messages = [];
+    for (let chatId = 91; chatId <= 100; chatId += 1) {
+      messages.push({ chatId, senderId: 999, unreadMemberCount: 3 });
+    }
+
+    // 1차: READ_UP_TO(99) — (90,99] 반영, 91~99가 1회 감소
+    act(() => {
+      const applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 99 },
+      ]);
+      messages = applyReadEvents(messages, applicable);
+    });
+
+    for (let chatId = 91; chatId <= 99; chatId += 1) {
+      expect(messages.find((m) => m.chatId === chatId).unreadMemberCount).toBe(2);
+    }
+    expect(messages.find((m) => m.chatId === 100).unreadMemberCount).toBe(3);
+
+    // 2차: CHAT_MESSAGE(100) — stale previous(90)를 실은 (90,100] 이벤트가 뒤늦게 도착
+    act(() => {
+      const applicable = result.current.selectApplicableReadEvents([
+        { memberId: 1, previousLastReadChatId: 90, currentLastReadChatId: 100 },
+      ]);
+      messages = applyReadEvents(messages, applicable);
+    });
+
+    // 91~99는 effectivePrevious 보정 덕분에 추가로 감소하지 않고 2를 유지해야 한다
+    for (let chatId = 91; chatId <= 99; chatId += 1) {
+      expect(messages.find((m) => m.chatId === chatId).unreadMemberCount).toBe(2);
+    }
+    // 100만 이번에 새로 1회 감소한다
+    expect(messages.find((m) => m.chatId === 100).unreadMemberCount).toBe(2);
   });
 });

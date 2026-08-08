@@ -129,21 +129,34 @@ export function useReadReceipt({ sendReadUpTo, isSpaceActive }) {
     pendingReadCursorRef.current = null;
   }, [cancelTrailingTimer]);
 
-  // READ_EVENT의 멤버별 stale/역전 판단만 수행한다.
+  // READ_EVENT의 멤버별 stale/역전 판단 + 이미 반영한 범위와 겹치는 부분 제거(effectivePrevious 보정)를 수행한다.
   // chatRoomId 일치 검사, messages 반영(applyReadEvent), lastReadMessageId 갱신은 호출 측(ChatPage/useRoomHistory)이 담당한다.
-  const shouldApplyReadEvent = useCallback((event) => {
+  // - stale/중복(current <= lastProcessed)이면 null을 반환해 적용 대상에서 제외한다.
+  // - 적용 가능하면 previousLastReadChatId를 effectivePrevious로 보정한 이벤트를 반환한다.
+  //   effectivePrevious는 반드시 memberLastReadRef를 갱신하기 "전"의 lastProcessed로 계산해야 한다
+  //   (먼저 덮어쓰면 항상 previous==current가 되어 모든 이벤트가 빈 범위로 무력화된다).
+  const resolveApplicableReadEvent = useCallback((event) => {
     const lastProcessed = memberLastReadRef.current[event.memberId] ?? null;
-    if (lastProcessed !== null && event.currentLastReadChatId <= lastProcessed) return false;
+    if (lastProcessed !== null && event.currentLastReadChatId <= lastProcessed) return null;
+
+    let effectivePrevious;
+    if (lastProcessed === null) {
+      effectivePrevious = event.previousLastReadChatId;
+    } else if (event.previousLastReadChatId === null) {
+      effectivePrevious = lastProcessed;
+    } else {
+      effectivePrevious = Math.max(event.previousLastReadChatId, lastProcessed);
+    }
 
     memberLastReadRef.current[event.memberId] = event.currentLastReadChatId;
-    return true;
+    return { ...event, previousLastReadChatId: effectivePrevious };
   }, []);
 
   // READ_EVENT_BATCH(및 단건 READ_EVENT를 배열 1개로 감싼 값)에서 실제로 적용해야 할 read만 골라낸다.
   // - malformed item(null, memberId/currentLastReadChatId 없음)은 조용히 무시한다.
   // - 같은 batch 안에 동일 memberId가 여러 번 있으면 서버 accumulator와 동일한 정책으로 병합한다
   //   (병합하지 않고 각 item을 그대로 순서대로 적용하면 겹치는 (previous, current] 범위가 messages에 중복 반영될 수 있다).
-  // - 멤버별 stale/역행 판단은 기존 shouldApplyReadEvent를 그대로 재사용한다(로직 복제 없음).
+  // - 멤버별 stale/역행 판단 및 겹치는 범위 보정은 resolveApplicableReadEvent를 그대로 재사용한다(로직 복제 없음).
   const selectApplicableReadEvents = useCallback((reads) => {
     if (!Array.isArray(reads)) return [];
 
@@ -175,12 +188,13 @@ export function useReadReceipt({ sendReadUpTo, isSpaceActive }) {
 
     const applicable = [];
     for (const event of mergedByMemberId.values()) {
-      if (shouldApplyReadEvent(event)) {
-        applicable.push(event);
+      const resolved = resolveApplicableReadEvent(event);
+      if (resolved !== null) {
+        applicable.push(resolved);
       }
     }
     return applicable;
-  }, [shouldApplyReadEvent]);
+  }, [resolveApplicableReadEvent]);
 
   // 방 전환 / 재연결 시 READ lifecycle 전체를 초기화한다. discardPendingRead()를 재사용해 중복을 줄인다.
   const resetReadReceipt = useCallback(() => {
@@ -202,7 +216,7 @@ export function useReadReceipt({ sendReadUpTo, isSpaceActive }) {
     flushPendingRead,
     discardPendingRead,
     resetReadReceipt,
-    shouldApplyReadEvent,
+    resolveApplicableReadEvent,
     selectApplicableReadEvents,
   };
 }
