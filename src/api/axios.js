@@ -10,6 +10,8 @@ axiosInstance.interceptors.response.use(
   (error) => {
     const status = error.response?.status;
     if (status === 401) {
+      sessionStorage.removeItem("memberId");
+      sessionStorage.removeItem("nickname");
       window.location.href = "/";
     }
     return Promise.reject(error);
