@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { signup } from "../api/memberApi";
 
 export default function SignupPage() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [form, setForm] = useState({
     username: "",
@@ -39,7 +40,10 @@ export default function SignupPage() {
 
     try {
       await signup(form.username, form.password, form.nickname);
-      navigate("/", { replace: true });
+      navigate("/", {
+        replace: true,
+        state: location.state?.from ? { from: location.state.from } : undefined,
+      });
     } catch (err) {
       const message = err.response?.data?.message;
       setError(message || "회원가입 중 오류가 발생했습니다.");
@@ -113,6 +117,7 @@ export default function SignupPage() {
 
         <Link
           to="/"
+          state={location.state?.from ? { from: location.state.from } : undefined}
           className="text-center text-orbit-muted hover:text-orbit-text text-sm transition-colors"
         >
           이미 계정이 있으신가요? 로그인
