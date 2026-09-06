@@ -8,10 +8,9 @@ import {
   markPendingMessageSending,
 } from "../utils/messageState";
 
-// CHAT_MESSAGE ERROR의 errorCode 중 같은 메시지를 재시도해도 동일하게 실패하는 errorCode.
-// ROOM_NOT_JOINED: handleRetryMessage는 sendChatMessage만 재호출하고 ENTER_ROOM을 다시 보내지 않으므로,
-// session이 room에 등록되지 않은 상태는 메시지 재시도만으로 복구되지 않는다. (ENTER_ROOM -> ACK -> ready 복구 후 재전송이 필요)
-// 여기 없는 errorCode(INTERNAL_ERROR, 미분류 포함)는 재시도 가능으로 간주한다(fail-open).
+// CHAT_MESSAGE ERROR의 errorCode 중 재시도해도 동일하게 실패하는 errorCode.
+// ROOM_NOT_JOINED은 handleRetryMessage가 ENTER_ROOM을 재전송하지 않아 메시지 재시도만으로 복구되지 않는다.
+// 여기 없는 errorCode(INTERNAL_ERROR 등)는 재시도 가능으로 간주한다(fail-open).
 const CHAT_MESSAGE_NON_RETRYABLE_ERROR_CODES = new Set([
   "ROOM_NOT_JOINED",
   "ROOM_NOT_FOUND",
@@ -65,7 +64,6 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     [selectedSpaceIdRef]
   );
 
-  // 방 선택 시: 메시지 관련 상태를 모두 초기화한 뒤 history를 조회한다.
   const loadHistoryForSpace = useCallback(
     (spaceId) => {
       setMessages([]);
@@ -79,8 +77,7 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     [runHistoryFetch]
   );
 
-  // 재연결 시: messages/pendingMessages/isLoadingMore만 초기화한 뒤 history를 복구한다.
-  // lastReadMessageId/hasMore/oldestChatId는 초기화하지 않는다 (기존 reconnect effect와 동일한 초기화 범위).
+  // 재연결 복구 시 lastReadMessageId/hasMore/oldestChatId는 초기화하지 않는다(기존 동작 유지).
   const recoverHistoryAfterReconnect = useCallback(
     (spaceId) => {
       setMessages([]);
@@ -91,7 +88,7 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     [runHistoryFetch]
   );
 
-  // 메시지 history 재시도 — 기존 messages/pendingMessages는 그대로 유지한 채 다시 조회한다.
+  // 기존 messages/pendingMessages는 유지한 채 재조회한다.
   const handleRetryHistory = useCallback(() => {
     if (!selectedSpaceId) return;
     runHistoryFetch(selectedSpaceId);
@@ -122,9 +119,9 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     setMessages((prev) => mergeMessagesById(prev, [data]));
   }, []);
 
-  // WebSocket ERROR(requestType=CHAT_MESSAGE) 반영: pending message를 failed로 변경한다.
+  // WebSocket ERROR(requestType=CHAT_MESSAGE) 시 호출된다.
   const handleChatMessageError = useCallback((clientMessageId, errorCode) => {
-    // errorCode/retryable은 markPendingMessageFailed가 다루는 status와 별개의 부가 필드로 얹는다
+    // errorCode/retryable은 markPendingMessageFailed가 다루는 status와 별개 필드로 얹는다.
     setPendingMessages((prev) =>
       markPendingMessageFailed(prev, clientMessageId).map((p) =>
         p.clientMessageId === clientMessageId
@@ -162,7 +159,6 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     );
   }, []);
 
-  // 메시지 전송
   const handleSend = useCallback(
     (message) => {
       const clientMessageId = crypto.randomUUID();
@@ -186,7 +182,7 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     [selectedSpaceId, sendChatMessage, auth]
   );
 
-  // failed pending message를 재시도: 같은 clientMessageId로 sendChatMessage를 재호출하고 status를 "sending"으로 되돌린다
+  // 같은 clientMessageId로 재전송해 서버 echo와 매칭되게 한다.
   const handleRetryMessage = useCallback(
     (clientMessageId) => {
       if (connectionState !== "ready") return;
@@ -202,7 +198,7 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     [connectionState, pendingMessages, sendChatMessage]
   );
 
-  // failed pending message를 화면에서 제거 (local-only, 서버 요청 없음)
+  // local-only — 서버 요청 없음.
   const handleRemoveFailedMessage = useCallback((clientMessageId) => {
     setPendingMessages((prev) => removePendingByClientMessageId(prev, clientMessageId));
   }, []);
@@ -213,7 +209,6 @@ export function useRoomHistory({ selectedSpaceId, selectedSpaceIdRef, connection
     setPendingMessages([]);
   }, []);
 
-  // 서버 확정 메시지 + FE 전송 중 메시지를 합친 렌더링 목록
   const renderMessages = useMemo(
     () => [...messages, ...pendingMessages],
     [messages, pendingMessages]

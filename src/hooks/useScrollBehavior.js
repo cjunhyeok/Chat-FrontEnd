@@ -44,20 +44,16 @@ export default function useScrollBehavior({
     }
   };
 
-  // scrollIntoView는 대상 엘리먼트(bottomRef)와 스크롤 컨테이너 사이의 정렬을 브라우저가 계산하는 방식이라,
-  // flex layout 변화(textarea 높이 축소 등)나 scroll anchoring과 겹치면 결과 위치가 흔들릴 수 있다.
-  // 채팅창에서는 "특정 엘리먼트를 보이게" 하는 것보다 스크롤 컨테이너 자체를 명확한 최대값으로 보내는 게 더 안정적이다.
+  // scrollIntoView는 flex layout 변화(textarea 높이 축소 등)나 scroll anchoring과 겹치면 결과 위치가 흔들릴 수 있어,
+  // 컨테이너의 scrollTop을 최대값으로 직접 지정하는 편이 더 안정적이다.
   const scrollToBottomImmediately = () => {
     const el = scrollContainerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight - el.clientHeight;
   };
 
-  // 내가 보낸 메시지가 추가되면 paint 전에 즉시 bottom을 고정한다.
-  // pending row 추가 + 입력창 높이 축소(textarea auto-resize)가 같은 commit/reflow에서 일어나면
-  // scrollTop이 순간적으로 clamp되어 "위로 튄" 프레임이 먼저 그려질 수 있다.
-  // useEffect(paint 이후)로 보정하면 그 튄 프레임이 이미 화면에 그려진 뒤라 늦으므로,
-  // paint 전에 동기 실행되는 useLayoutEffect에서 먼저 bottom을 고정한다.
+  // 내가 보낸 메시지 추가 시 paint 전에 bottom을 고정한다 — pending row 추가와 입력창 높이 축소가 같은 commit에서
+  // 일어나면 scrollTop이 clamp되어 "위로 튄" 프레임이 그려질 수 있고, useEffect(paint 이후)로는 보정이 늦다.
   // 최초 진입 처리는 아래 useEffect가 전담하므로 scrolledRef.current가 true인 이후에만 동작한다.
   useLayoutEffect(() => {
     if (loading) return;
@@ -108,7 +104,7 @@ export default function useScrollBehavior({
     }
   }, [loading, messages, lastReadMessageId, currentUserId]);
 
-  // isLoadingMore prop을 ref에 동기화 (다른 effect 내부에서 최신값 참조용)
+  // 다른 effect에서 최신값을 동기적으로 참조하기 위해 ref로 동기화한다.
   useEffect(() => {
     isLoadingMoreRef.current = isLoadingMore;
   }, [isLoadingMore]);
