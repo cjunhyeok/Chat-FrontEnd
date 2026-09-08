@@ -26,11 +26,9 @@ export function useSpaces(selectedSpaceId) {
 
   // 진행 중인 refresh의 Promise. 중복 호출 시 새 GET 대신 이 Promise를 그대로 반환한다(single-flight).
   const refreshingRef = useRef(null);
-  // 진행 중인 refresh가 끝난 뒤 한 번 더 refresh해야 하는지 여부.
   const refreshRequestedRef = useRef(false);
 
-  // 새로 고침된(병합·정렬된) spaces 배열을 resolve하는 Promise를 반환한다.
-  // 실패 시에도 reject하지 않고 null을 resolve한다 — 기존 fire-and-forget 호출부가 unhandled rejection 없이 그대로 동작하도록 하기 위함.
+  // 실패 시에도 reject하지 않고 null을 resolve한다 — 기존 fire-and-forget 호출부가 unhandled rejection 없이 동작하도록 하기 위함.
   const refreshSpaces = useCallback(() => {
     if (refreshingRef.current) {
       refreshRequestedRef.current = true;
@@ -65,8 +63,7 @@ export function useSpaces(selectedSpaceId) {
     return refreshingRef.current;
   }, []);
 
-  // ROOM_MESSAGE_SUMMARY_UPDATED 이벤트를 spaces에 적용한다(중복/역전 무시, unread 갱신, 재정렬은 applyRoomMessageSummary가 담당).
-  // isActiveSpace는 호출부(ChatPage)가 useSpaceActivity의 isSpaceActive(spaceId) 판정을 넘겨준다.
+  // isActiveSpace는 호출부(ChatPage)가 useSpaceActivity.isSpaceActive(spaceId) 판정을 넘겨준다.
   const applyMessageSummary = useCallback((event, isActiveSpace) => {
     setSpaces((prev) => applyRoomMessageSummary(prev, event, isActiveSpace));
   }, []);

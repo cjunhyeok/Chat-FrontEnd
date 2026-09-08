@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { login } from "../api/memberApi";
 import { useAuth } from "../context/AuthContext";
 
 export default function LoginPage() {
   const { signin } = useAuth();
+  const location = useLocation();
 
   const [form, setForm] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
@@ -80,6 +81,7 @@ export default function LoginPage() {
 
         <Link
           to="/signup"
+          state={location.state?.from ? { from: location.state.from } : undefined}
           className="text-center text-orbit-muted hover:text-orbit-text text-sm transition-colors"
         >
           계정이 없으신가요? 회원가입

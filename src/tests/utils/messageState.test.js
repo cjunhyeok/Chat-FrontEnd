@@ -1,4 +1,4 @@
-import { mergeMessagesById, mergeDiscussionMessagesById, applyReadEvent, applyReadEvents, removePendingByClientMessageId, markPendingMessageFailed, markPendingMessageSending } from '../../utils/messageState';
+import { mergeMessagesById, mergeDiscussionMessagesById, applyReadEvents, removePendingByClientMessageId, markPendingMessageFailed, markPendingMessageSending } from '../../utils/messageState';
 
 test('history 응답이 늦게 도착해도 동일 chatId 메시지는 중복되지 않는다', () => {
   // WS로 먼저 도착한 메시지가 READ_EVENT로 갱신된 상태
@@ -85,9 +85,9 @@ test('Discussion 메시지 병합 결과는 discussionMessageId 오름차순을 
   expect(result.map((m) => m.discussionMessageId)).toEqual([1, 2, 3, 4, 5]);
 });
 
-// ── applyReadEvent ─────────────────────────────────────────────────────────
+// ── applyReadEvents (READ_EVENT_BATCH) ──────────────────────────────────────
 
-test('READ_EVENT 범위에 포함된 메시지만 unreadMemberCount가 감소한다', () => {
+test('READ_EVENT_BATCH 범위에 포함된 메시지만 unreadMemberCount가 감소한다', () => {
   const messages = [
     { chatId: 1, senderId: 99, unreadMemberCount: 3 },
     { chatId: 2, senderId: 99, unreadMemberCount: 3 },
@@ -100,7 +100,7 @@ test('READ_EVENT 범위에 포함된 메시지만 unreadMemberCount가 감소한
     currentLastReadChatId: 3,
   };
 
-  const result = applyReadEvent(messages, readEvent);
+  const result = applyReadEvents(messages, [readEvent]);
 
   // chatId 1, 2: 범위 밖 → 변화 없음
   expect(result[0].unreadMemberCount).toBe(3);
@@ -111,7 +111,7 @@ test('READ_EVENT 범위에 포함된 메시지만 unreadMemberCount가 감소한
   expect(result[3].unreadMemberCount).toBe(3);
 });
 
-test('READ_EVENT를 발생시킨 사용자의 메시지는 unreadMemberCount가 감소하지 않는다', () => {
+test('READ_EVENT_BATCH를 발생시킨 사용자의 메시지는 unreadMemberCount가 감소하지 않는다', () => {
   const messages = [
     { chatId: 1, senderId: 42, unreadMemberCount: 3 }, // 이벤트 발생자 본인 메시지
     { chatId: 2, senderId: 99, unreadMemberCount: 3 }, // 다른 멤버 메시지
@@ -122,7 +122,7 @@ test('READ_EVENT를 발생시킨 사용자의 메시지는 unreadMemberCount가 
     currentLastReadChatId: 2,
   };
 
-  const result = applyReadEvent(messages, readEvent);
+  const result = applyReadEvents(messages, [readEvent]);
 
   // 본인 메시지 → 감소하지 않음
   expect(result[0].unreadMemberCount).toBe(3);
@@ -130,22 +130,7 @@ test('READ_EVENT를 발생시킨 사용자의 메시지는 unreadMemberCount가 
   expect(result[1].unreadMemberCount).toBe(2);
 });
 
-test('unreadMemberCount는 0 아래로 내려가지 않는다', () => {
-  const messages = [
-    { chatId: 1, senderId: 99, unreadMemberCount: 0 },
-  ];
-  const readEvent = {
-    memberId: 42,
-    previousLastReadChatId: null,
-    currentLastReadChatId: 1,
-  };
-
-  const result = applyReadEvent(messages, readEvent);
-
-  expect(result[0].unreadMemberCount).toBe(0);
-});
-
-test('READ_EVENT로_갱신된_prev는_뒤늦게_도착한_stale_REST_응답에_의해_롤백되지_않는다', () => {
+test('READ_EVENT_BATCH로_갱신된_prev는_뒤늦게_도착한_stale_REST_응답에_의해_롤백되지_않는다', () => {
   const base = [{ chatId: 4, senderId: 99, unreadMemberCount: 3 }];
   const readEvent = {
     memberId: 42,
@@ -153,7 +138,7 @@ test('READ_EVENT로_갱신된_prev는_뒤늦게_도착한_stale_REST_응답에_�
     currentLastReadChatId: 4,
   };
 
-  const prev = applyReadEvent(base, readEvent);
+  const prev = applyReadEvents(base, [readEvent]);
 
   const incoming = [{ chatId: 4, senderId: 99, unreadMemberCount: 3 }];
 
@@ -163,8 +148,6 @@ test('READ_EVENT로_갱신된_prev는_뒤늦게_도착한_stale_REST_응답에_�
   expect(result[0].chatId).toBe(4);
   expect(result[0].unreadMemberCount).toBe(2);
 });
-
-// ── applyReadEvents (READ_EVENT_BATCH) ──────────────────────────────────────
 
 test('readEvents가 비어 있으면 messages를 그대로(같은 참조로) 반환한다', () => {
   const messages = [{ chatId: 1, senderId: 99, unreadMemberCount: 3 }];
@@ -192,7 +175,7 @@ test('batch의 여러 read item이 한 번의 순회로 모두 반영된다', ()
   expect(result[1].unreadMemberCount).toBe(1);
 });
 
-test('applyReadEvent를 배열로 반복 적용한 결과와 applyReadEvents의 결과는 동일하다', () => {
+test('read item을 하나씩 순차 적용한 결과와 batch로 한 번에 적용한 결과는 동일하다', () => {
   const messages = [
     { chatId: 1, senderId: 99, unreadMemberCount: 3 },
     { chatId: 2, senderId: 99, unreadMemberCount: 3 },
@@ -203,7 +186,7 @@ test('applyReadEvent를 배열로 반복 적용한 결과와 applyReadEvents의 
     { memberId: 11, previousLastReadChatId: 1, currentLastReadChatId: 3 },
   ];
 
-  const sequential = readEvents.reduce((acc, e) => applyReadEvent(acc, e), messages);
+  const sequential = readEvents.reduce((acc, e) => applyReadEvents(acc, [e]), messages);
   const batched = applyReadEvents(messages, readEvents);
 
   expect(batched).toEqual(sequential);

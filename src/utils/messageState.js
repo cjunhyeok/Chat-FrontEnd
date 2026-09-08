@@ -71,7 +71,7 @@ export function markPendingMessageSending(pendingMessages, clientMessageId) {
 }
 
 /**
- * 메시지 하나에 READ_EVENT 하나를 적용한 결과를 반환한다 (applyReadEvent/applyReadEvents가 공유하는 핵심 로직).
+ * 메시지 하나에 read item 하나를 적용한 결과를 반환한다 (applyReadEvents가 사용하는 핵심 로직).
  *
  * 정책:
  * - previousLastReadChatId < chatId <= currentLastReadChatId 범위에 해당하는 메시지만 대상
@@ -95,18 +95,7 @@ function applyReadEventToMessage(msg, readEvent) {
 }
 
 /**
- * READ_EVENT를 받아 messages 배열에 unreadMemberCount 감소를 적용한다.
- *
- * @param {Array<{chatId: number, senderId: number, unreadMemberCount: number}>} messages
- * @param {{ memberId: number, previousLastReadChatId: number|null, currentLastReadChatId: number }} readEvent
- * @returns {Array}
- */
-export function applyReadEvent(messages, readEvent) {
-  return messages.map((msg) => applyReadEventToMessage(msg, readEvent));
-}
-
-/**
- * READ_EVENT_BATCH(또는 단건을 배열 1개로 감싼 값)를 messages에 한 번의 순회로 적용한다.
+ * READ_EVENT_BATCH를 messages에 한 번의 순회로 적용한다.
  * readEvents의 각 항목은 이미 멤버별 중복 병합·stale 판단(useReadReceipt.selectApplicableReadEvents)을
  * 마친 상태여야 한다 — 여기서는 적용 로직만 재사용한다.
  *
